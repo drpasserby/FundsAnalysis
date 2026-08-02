@@ -1,6 +1,6 @@
 """
 资金流水走向分析工具
-版本：1.0.2
+版本：1.0.3
 作者：wulvxinchen
 """
 
@@ -9,6 +9,7 @@ import tkinter as tk
 from tkinter import filedialog
 from tkinter import messagebox
 import sys
+import json
 import pandas as pd
 import networkx as nx
 import matplotlib.pyplot as plt
@@ -133,8 +134,14 @@ if data_messages:
 if df.empty:
     sys.exit('没有可用的有效数据，程序退出。')
 
-if merge_edges.get():
-    edge_data = defaultdict(lambda: {'to_weight': 0.0, 'from_weight': 0.0})
+# ================= 图构建（统一，一次遍历产出两套图） =================
+def build_graphs(df):
+    """一次遍历构建两套有向图：
+    G_sep —— 收入/支出不合并：支出边 a→c，收入边 c→a；
+    G_mer —— 同一对节点合并存储收支，双向分别画边。
+    """
+    edge_sep = defaultdict(lambda: {'weight': 0.0, 'type': None})
+    edge_mer = defaultdict(lambda: {'to_weight': 0.0, 'from_weight': 0.0})
 
     for _, row in df.iterrows():
         a = str(row.iloc[0]).strip()
@@ -146,43 +153,106 @@ if merge_edges.get():
             continue
 
         if '支出' in direction:
-            edge_data[(a, c)]['to_weight'] += amount
+            edge_sep[(a, c)]['weight'] += amount
+            edge_sep[(a, c)]['type'] = '支出'
+            edge_mer[(a, c)]['to_weight'] += amount
         elif '收入' in direction:
-            edge_data[(a, c)]['from_weight'] += amount
+            edge_sep[(c, a)]['weight'] += amount
+            edge_sep[(c, a)]['type'] = '收入'
+            edge_mer[(a, c)]['from_weight'] += amount
 
-    G = nx.DiGraph()
-    for (u, v), info in edge_data.items():
+    G_sep = nx.DiGraph()
+    for (u, v), info in edge_sep.items():
+        G_sep.add_edge(u, v, weight=info['weight'], etype=info['type'])
+
+    G_mer = nx.DiGraph()
+    for (u, v), info in edge_mer.items():
         if info['to_weight'] > 0:
-            G.add_edge(u, v, weight=info['to_weight'], etype='支出', merged=True, opposite_weight=info['from_weight'])
+            G_mer.add_edge(u, v, weight=info['to_weight'], etype='支出')
         if info['from_weight'] > 0:
-            G.add_edge(v, u, weight=info['from_weight'], etype='收入', merged=True, opposite_weight=info['to_weight'])
+            G_mer.add_edge(v, u, weight=info['from_weight'], etype='收入')
 
-else:
-    edge_data = defaultdict(lambda: {'weight': 0.0, 'type': None})
+    return G_sep, G_mer
 
-    for _, row in df.iterrows():
-        a = str(row.iloc[0]).strip()
-        direction = str(row.iloc[1]).strip()
-        c = str(row.iloc[2]).strip()
-        amount = float(row.iloc[3])
 
-        if '支出' in direction:
-            source, target, etype = a, c, '支出'
-        elif '收入' in direction:
-            source, target, etype = c, a, '收入'
+G_sep, G_mer = build_graphs(df)
+G = G_mer if merge_edges.get() else G_sep
+
+# ================= 数据契约（供 HTML 渲染使用） =================
+def build_contract(G_sep, G_mer):
+    """生成 HTML 端使用的数据契约：坐标归一化到 [0,1]，节点大小设上限。
+    返回 {'nodes': [...], 'edgesSep': [...], 'edgesMer': [...]}
+    """
+    all_nodes = list(set(G_sep.nodes()) | set(G_mer.nodes()))
+
+    pos = nx.spring_layout(G_sep, k=4, seed=42) if len(G_sep.nodes()) > 0 else {}
+
+    degree_dict = {}
+    for node in all_nodes:
+        pred = set(G_sep.predecessors(node)) if node in G_sep else set()
+        succ = set(G_sep.successors(node)) if node in G_sep else set()
+        degree_dict[node] = len(pred | succ)
+
+    # 坐标归一化到 [0,1]
+    xs = [pos[n][0] for n in all_nodes if n in pos]
+    ys = [pos[n][1] for n in all_nodes if n in pos]
+    if xs and ys:
+        minx, maxx = min(xs), max(xs)
+        miny, maxy = min(ys), max(ys)
+        if maxx - minx == 0:
+            maxx += 1
+        if maxy - miny == 0:
+            maxy += 1
+    else:
+        minx, maxx, miny, maxy = 0, 1, 0, 1
+
+    # 节点大小：基础值 + 度 * 缩放，设上限防止枢纽节点过大
+    base_size = 500
+    scale = 300
+    max_size = 3000
+    size_dict = {n: min(base_size + scale * degree_dict[n], max_size) for n in all_nodes}
+    max_s = max(size_dict.values()) if size_dict else 1
+    min_s = min(size_dict.values()) if size_dict else 1
+
+    nodes_json = []
+    for node in all_nodes:
+        if node in pos:
+            x = float((pos[node][0] - minx) / (maxx - minx))
+            y = float((pos[node][1] - miny) / (maxy - miny))
         else:
-            continue
+            x, y = 0.5, 0.5
+        raw_s = size_dict[node]
+        display_s = 15 + (raw_s - min_s) / (max_s - min_s) * 40 if max_s != min_s else 30
+        nodes_json.append({'id': node, 'x': x, 'y': y, 'size': display_s, 'degree': degree_dict[node]})
 
-        if source == target:
-            continue
+    def edge_list(G):
+        edges = []
+        for u, v in G.edges():
+            info = G[u][v]
+            rad = 0.0
+            if G.has_edge(v, u):
+                rad = 0.25 if u < v else -0.25
+            edges.append({
+                'source': u,
+                'target': v,
+                'type': info.get('etype', ''),
+                'amount': info['weight'],
+                'rad': rad
+            })
+        return edges
 
-        key = (source, target)
-        edge_data[key]['weight'] += amount
-        edge_data[key]['type'] = etype
+    return {
+        'nodes': nodes_json,
+        'edgesSep': edge_list(G_sep),
+        'edgesMer': edge_list(G_mer),
+    }
 
-    G = nx.DiGraph()
-    for (u, v), info in edge_data.items():
-        G.add_edge(u, v, weight=info['weight'], etype=info['type'])
+
+contract = build_contract(G_sep, G_mer)
+with open('资金流向图.json', 'w', encoding='utf-8') as f:
+    json.dump(contract, f, ensure_ascii=False, indent=2)
+if sys.stdout is not None:
+    print('已生成 资金流向图.json（数据契约，坐标已归一化到 [0,1]）。')
 
 degree_dict = {}
 for node in G.nodes():
