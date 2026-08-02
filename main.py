@@ -1,6 +1,6 @@
 """
 资金流水走向分析工具
-版本：1.0.1
+版本：1.0.2
 作者：wulvxinchen
 """
 
@@ -64,6 +64,74 @@ if file_path == '未选择文件':
     sys.exit('未选择数据文件，程序退出。')
 
 df = pd.read_excel(file_path, sheet_name='Sheet1', header=0)
+
+# ================= 数据校验与清洗 =================
+def validate_and_clean(raw_df):
+    """校验数据格式并清洗：返回 (清洗后的DataFrame, 提示信息列表)。"""
+    messages = []
+
+    if raw_df.shape[1] < 4:
+        messagebox.showerror(
+            '数据格式错误',
+            '数据列数不足：当前共 {} 列，至少需要 4 列。\n'
+            '请确认数据格式为：用户方 | 支出/收入 | 客户方 | 金额'.format(raw_df.shape[1]))
+        sys.exit(1)
+
+    # 表头软校验（仅提示，不阻断）
+    headers = [str(h) for h in raw_df.columns[:4]]
+    if not ('收入' in headers[1] or '支出' in headers[1]):
+        messages.append('提示：第 2 列表头“{}”未包含“支出/收入”'.format(headers[1]))
+    if '金额' not in headers[3]:
+        messages.append('提示：第 4 列表头“{}”未包含“金额”'.format(headers[3]))
+
+    cleaned = []
+    bad_rows = []
+    self_loops = 0
+    for i, row in raw_df.iterrows():
+        row_no = i + 2  # 表头占第 1 行，数据从第 2 行开始
+        a, direction, c, amount = row.iloc[0], row.iloc[1], row.iloc[2], row.iloc[3]
+
+        if pd.isna(a) or pd.isna(c) or pd.isna(direction):
+            bad_rows.append('第 {} 行：用户方/客户方/方向 存在空值'.format(row_no))
+            continue
+
+        a = str(a).strip()
+        direction = str(direction).strip()
+        c = str(c).strip()
+
+        if '支出' not in direction and '收入' not in direction:
+            bad_rows.append('第 {} 行：方向“{}”不是“支出”或“收入”'.format(row_no, direction))
+            continue
+
+        try:
+            amount = float(amount)
+        except (TypeError, ValueError):
+            bad_rows.append('第 {} 行：金额“{}”无法转换为数字'.format(row_no, amount))
+            continue
+
+        if a == c:
+            self_loops += 1
+
+        cleaned.append([a, direction, c, amount])
+
+    if self_loops:
+        messages.append('自环记录 {} 条（已跳过）'.format(self_loops))
+    if bad_rows:
+        messages.append('发现 {} 处问题，已自动跳过：'.format(len(bad_rows)))
+        messages.extend(bad_rows[:20])
+        if len(bad_rows) > 20:
+            messages.append('……共 {} 处，仅显示前 20 处'.format(len(bad_rows)))
+
+    return pd.DataFrame(cleaned, columns=raw_df.columns[:4]), messages
+
+
+df, data_messages = validate_and_clean(df)
+
+if data_messages:
+    messagebox.showwarning('数据校验提示', '\n'.join(data_messages))
+
+if df.empty:
+    sys.exit('没有可用的有效数据，程序退出。')
 
 if merge_edges.get():
     edge_data = defaultdict(lambda: {'to_weight': 0.0, 'from_weight': 0.0})
