@@ -1,11 +1,12 @@
 """
 资金流水走向分析工具
-版本：1.0.0
+版本：1.0.1
 作者：wulvxinchen
 """
 
 
 import tkinter as tk
+from tkinter import filedialog
 from tkinter import messagebox
 import sys
 import pandas as pd
@@ -17,11 +18,12 @@ from collections import defaultdict
 
 opt_root = tk.Tk()
 opt_root.title('生成选项')
-opt_root.geometry('350x200+600+400')
+opt_root.geometry('360x280+600+400')
 
 show_amount = tk.BooleanVar(value=True)
 merge_edges = tk.BooleanVar(value=False)
 custom_title = tk.StringVar(value='演示图')
+file_path_var = tk.StringVar(value='未选择文件')
 
 tk.Label(opt_root, text='请选择绘图选项：', font=('', 10, 'bold')).pack(pady=5)
 
@@ -35,13 +37,33 @@ tk.Label(opt_root, text='自定义标题：').pack(anchor='w', padx=20, pady=(8,
 title_entry = tk.Entry(opt_root, textvariable=custom_title, width=30)
 title_entry.pack(padx=20, pady=3)
 
+def choose_file():
+    path = filedialog.askopenfilename(
+        title='选择数据文件',
+        filetypes=[('Excel 文件', '*.xlsx;*.xls'), ('所有文件', '*.*')])
+    if path:
+        file_path_var.set(path)
+
+tk.Label(opt_root, text='数据文件：').pack(anchor='w', padx=20, pady=(8,0))
+file_frame = tk.Frame(opt_root)
+file_frame.pack(fill='x', padx=20, pady=3)
+tk.Button(file_frame, text='选择文件...', command=choose_file, width=12).pack(side='left')
+tk.Label(file_frame, textvariable=file_path_var, fg='gray', anchor='w', width=20).pack(side='left', padx=8)
+
 def confirm():
+    if file_path_var.get() == '未选择文件':
+        messagebox.showwarning('提示', '请先选择数据文件！')
+        return
     opt_root.destroy()
 
 tk.Button(opt_root, text='开始生成', command=confirm, width=12).pack(pady=10)
 opt_root.mainloop()
 
-df = pd.read_excel('流水透视.xlsx', sheet_name='Sheet1', header=0)
+file_path = file_path_var.get()
+if file_path == '未选择文件':
+    sys.exit('未选择数据文件，程序退出。')
+
+df = pd.read_excel(file_path, sheet_name='Sheet1', header=0)
 
 if merge_edges.get():
     edge_data = defaultdict(lambda: {'to_weight': 0.0, 'from_weight': 0.0})
