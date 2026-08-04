@@ -1,6 +1,6 @@
 """
 资金流水走向分析工具
-版本：1.0.3
+版本：1.1.0
 作者：wulvxinchen
 """
 
@@ -12,8 +12,6 @@ import sys
 import json
 import pandas as pd
 import networkx as nx
-import matplotlib.pyplot as plt
-from matplotlib.widgets import Button
 from collections import defaultdict
 
 
@@ -100,6 +98,10 @@ def validate_and_clean(raw_df):
         direction = str(direction).strip()
         c = str(c).strip()
 
+        if not a or not c or not direction:
+            bad_rows.append('第 {} 行：用户方/客户方/方向 为空白'.format(row_no))
+            continue
+
         if '支出' not in direction and '收入' not in direction:
             bad_rows.append('第 {} 行：方向“{}”不是“支出”或“收入”'.format(row_no, direction))
             continue
@@ -176,7 +178,6 @@ def build_graphs(df):
 
 
 G_sep, G_mer = build_graphs(df)
-G = G_mer if merge_edges.get() else G_sep
 
 # ================= 数据契约（供 HTML 渲染使用） =================
 def build_contract(G_sep, G_mer):
@@ -249,194 +250,337 @@ def build_contract(G_sep, G_mer):
 
 
 contract = build_contract(G_sep, G_mer)
-with open('资金流向图.json', 'w', encoding='utf-8') as f:
-    json.dump(contract, f, ensure_ascii=False, indent=2)
+
+
+# ================= HTML 输出（自包含交互式查看器） =================
+def generate_html(contract, title='演示图', show_amount=True, merge_edges=False):
+    """生成自包含的交互式 HTML：数据内嵌、离线可用、兼容旧浏览器（ES5 语法）。
+    页面内可实时切换：显示金额 / 合并收支 / 自定义标题；
+    支持点击高亮、悬浮提示、滚轮缩放、拖拽平移、重置。
+    """
+    nodes_json = json.dumps(contract['nodes'], ensure_ascii=False).replace('</', '<\\/')
+    edges_sep_json = json.dumps(contract['edgesSep'], ensure_ascii=False).replace('</', '<\\/')
+    edges_mer_json = json.dumps(contract['edgesMer'], ensure_ascii=False).replace('</', '<\\/')
+    safe_title = (title.replace('&', '&amp;').replace('<', '&lt;')
+                       .replace('>', '&gt;').replace('"', '&quot;'))
+    amt_checked = ' checked' if show_amount else ''
+    merge_checked = ' checked' if merge_edges else ''
+    show_js = 'true' if show_amount else 'false'
+    merge_js = 'true' if merge_edges else 'false'
+
+    return '''<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>资金流向图</title>
+<style>
+body { margin:0; display:flex; flex-direction:column; align-items:center;
+       font-family:'Microsoft YaHei','SimHei',sans-serif; background:#fafafa; }
+#controls { margin:12px 0 4px; display:flex; flex-wrap:wrap; align-items:center; gap:14px; font-size:14px; }
+#controls label { cursor:pointer; }
+#titleText { margin:8px 0 2px; font-size:20px; color:#333; }
+#canvas { border:1px solid #ccc; background:#fff; cursor:grab; }
+#legend { font-size:13px; color:#555; }
+#footer { color:#bbb; font-size:12px; margin:6px 0 14px; }
+</style>
+</head>
+<body>
+<h2 id="titleText">''' + safe_title + '''</h2>
+<div id="controls">
+  <label><input type="checkbox" id="cbAmount"''' + amt_checked + '''> 显示金额</label>
+  <label><input type="checkbox" id="cbMerge"''' + merge_checked + '''> 收入/支出合并显示</label>
+  <span>标题：<input type="text" id="titleInput" value="''' + safe_title + '''"></span>
+  <button id="resetBtn" type="button">重置</button>
+  <span id="legend"><span style="color:#c0392b;">——支出</span>
+  <span style="color:#2e8b57;">——收入</span></span>
+</div>
+<canvas id="canvas"></canvas>
+<div id="footer">资金流水走向分析工具 Github@drpasserby(wlxc)</div>
+<script>
+var nodes = ''' + nodes_json + ''';
+var edgesSep = ''' + edges_sep_json + ''';
+var edgesMer = ''' + edges_mer_json + ''';
+var PADDING = 80;
+var scale = 1, panX = 0, panY = 0;
+var activeNode = null, hoverNode = null;
+var showAmount = ''' + show_js + ''';
+var mergeEdges = ''' + merge_js + ''';
+var currentEdges = mergeEdges ? edgesMer : edgesSep;
+var canvas = document.getElementById('canvas');
+var ctx = canvas.getContext('2d');
+var W, H;
+
+var nodeIndex = Object.create(null);
+for (var k = 0; k < nodes.length; k++) { nodeIndex[nodes[k].id] = nodes[k]; }
+
+function resizeCanvas() {
+    var w = Math.min(1400, (window.innerWidth || 1200) - 40);
+    var h = Math.min(900, (window.innerHeight || 800) - 130);
+    canvas.width = Math.max(600, w);
+    canvas.height = Math.max(400, h);
+    W = canvas.width; H = canvas.height;
+    draw();
+}
+resizeCanvas();
+
+function px(n) { return (PADDING + n.x * (W - 2 * PADDING)) * scale + panX; }
+function py(n) { return (PADDING + n.y * (H - 2 * PADDING)) * scale + panY; }
+
+function fmt(n) { return Math.round(n).toLocaleString(); }
+
+function nodeTotals(id) {
+    var tin = 0, tout = 0;
+    for (var i = 0; i < currentEdges.length; i++) {
+        var e = currentEdges[i];
+        if (e.target === id) { tin += e.amount; }
+        if (e.source === id) { tout += e.amount; }
+    }
+    return { in: tin, out: tout };
+}
+
+function draw() {
+    ctx.clearRect(0, 0, W, H);
+    drawEdges();
+    drawNodes();
+    drawTooltip();
+}
+
+function drawArrow(x, y, angle, color, alpha) {
+    var len = 12, w = Math.PI / 7;
+    ctx.save();
+    ctx.globalAlpha = alpha;
+    ctx.fillStyle = color;
+    ctx.translate(x, y);
+    ctx.rotate(angle);
+    ctx.beginPath();
+    ctx.moveTo(0, 0);
+    ctx.lineTo(-len, -len * Math.tan(w));
+    ctx.lineTo(-len, len * Math.tan(w));
+    ctx.closePath();
+    ctx.fill();
+    ctx.restore();
+}
+
+function edgeColor(type) {
+    if (type === '支出') { return '#c0392b'; }
+    if (type === '收入') { return '#2e8b57'; }
+    return '#888';
+}
+
+function drawEdges() {
+    var connected = null;
+    if (activeNode !== null) { connected = Object.create(null); connected[activeNode] = true; }
+    for (var i = 0; i < currentEdges.length; i++) {
+        var e = currentEdges[i];
+        var sn = nodeIndex[e.source];
+        var tn = nodeIndex[e.target];
+        if (!sn || !tn) { continue; }
+        var sx = px(sn), sy = py(sn);
+        var tx = px(tn), ty = py(tn);
+        var dx = tx - sx, dy = ty - sy;
+        var len = Math.sqrt(dx * dx + dy * dy);
+        if (len === 0) { continue; }
+        var nvx = -dy / len, nvy = dx / len;
+        var rad = e.rad || 0;
+        var off = rad * len;
+        var mx = (sx + tx) / 2 + off * nvx;
+        var my = (sy + ty) / 2 + off * nvy;
+
+        var alpha = 0.7, lineColor = edgeColor(e.type), textAlpha = 1.0;
+        if (activeNode !== null) {
+            if (e.source === activeNode || e.target === activeNode) { alpha = 1.0; }
+            else if (connected[e.source] && connected[e.target]) { alpha = 0.9; }
+            else { alpha = 0.15; textAlpha = 0.3; }
+        }
+
+        ctx.beginPath();
+        ctx.moveTo(sx, sy);
+        if (rad !== 0) { ctx.quadraticCurveTo(mx, my, tx, ty); }
+        else { ctx.lineTo(tx, ty); }
+        ctx.strokeStyle = lineColor;
+        ctx.lineWidth = 1.5;
+        ctx.globalAlpha = alpha;
+        ctx.stroke();
+        ctx.globalAlpha = 1;
+
+        var ax2, ay2, aAng;
+        if (rad !== 0) {
+            var tgx = tx - mx, tgy = ty - my;
+            var tl = Math.sqrt(tgx * tgx + tgy * tgy) || 1;
+            ax2 = tx - tgx / tl * 12;
+            ay2 = ty - tgy / tl * 12;
+            aAng = Math.atan2(tgy, tgx);
+        } else {
+            ax2 = tx - dx / len * 12;
+            ay2 = ty - dy / len * 12;
+            aAng = Math.atan2(dy, dx);
+        }
+        drawArrow(ax2, ay2, aAng, lineColor, (activeNode === null) ? 0.9 : alpha);
+
+        if (showAmount) {
+            var label = e.type + ' ' + fmt(e.amount);
+            ctx.font = '11px Microsoft YaHei, SimHei';
+            var tw = ctx.measureText(label).width;
+            var lx = (rad !== 0) ? mx : (sx + tx) / 2;
+            var ly = (rad !== 0) ? my : (sy + ty) / 2;
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+            ctx.globalAlpha = textAlpha;
+            ctx.fillStyle = '#fff';
+            ctx.fillRect(lx - tw / 2 - 4, ly - 9, tw + 8, 18);
+            ctx.fillStyle = '#333';
+            ctx.fillText(label, lx, ly);
+            ctx.globalAlpha = 1;
+        }
+    }
+}
+
+function drawNodes() {
+    var connected = null;
+    if (activeNode !== null) {
+        connected = Object.create(null);
+        for (var i = 0; i < currentEdges.length; i++) {
+            var e = currentEdges[i];
+            if (e.source === activeNode) { connected[e.target] = true; }
+            if (e.target === activeNode) { connected[e.source] = true; }
+        }
+        connected[activeNode] = true;
+    }
+    for (var j = 0; j < nodes.length; j++) {
+        var n = nodes[j];
+        var cx = px(n), cy = py(n);
+        var r = n.size * scale;
+        var fill = '#dbe9fb', border = '#333', bw = 0.8;
+        if (activeNode !== null) {
+            if (n.id === activeNode) { fill = '#f39c12'; border = '#c0392b'; bw = 3; }
+            else if (connected[n.id]) { fill = '#a9dfbf'; border = '#2e8b57'; bw = 2; }
+            else { fill = '#e5e5e5'; border = '#999'; bw = 0.5; }
+        }
+        ctx.beginPath();
+        ctx.arc(cx, cy, r, 0, 2 * Math.PI);
+        ctx.fillStyle = fill;
+        ctx.fill();
+        ctx.strokeStyle = border;
+        ctx.lineWidth = bw;
+        ctx.stroke();
+        ctx.font = '12px Microsoft YaHei, SimHei';
+        ctx.fillStyle = '#000';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(n.id, cx, cy);
+    }
+}
+
+function drawTooltip() {
+    if (hoverNode === null) { return; }
+    var n = nodeIndex[hoverNode];
+    if (!n) { return; }
+    var t = nodeTotals(hoverNode);
+    var lines = [hoverNode, '连接数：' + n.degree, '流入：' + fmt(t.in), '流出：' + fmt(t.out)];
+    ctx.font = '12px Microsoft YaHei, SimHei';
+    var tw = 0;
+    for (var i = 0; i < lines.length; i++) {
+        var wl = ctx.measureText(lines[i]).width;
+        if (wl > tw) { tw = wl; }
+    }
+    var bx = 12, by = 12;
+    ctx.fillStyle = 'rgba(255,255,255,0.95)';
+    ctx.strokeStyle = '#bbb';
+    ctx.lineWidth = 1;
+    ctx.fillRect(bx, by, tw + 16, lines.length * 18 + 10);
+    ctx.strokeRect(bx, by, tw + 16, lines.length * 18 + 10);
+    ctx.fillStyle = '#333';
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'top';
+    for (var j = 0; j < lines.length; j++) {
+        ctx.fillText(lines[j], bx + 8, by + 8 + j * 18);
+    }
+}
+
+function getMousePos(e) {
+    var rect = canvas.getBoundingClientRect();
+    return { x: e.clientX - rect.left, y: e.clientY - rect.top };
+}
+
+function nodeAt(mx, my) {
+    for (var i = 0; i < nodes.length; i++) {
+        var n = nodes[i];
+        var cx = px(n), cy = py(n);
+        var r = n.size * scale + 2;
+        var dx = mx - cx, dy = my - cy;
+        if (dx * dx + dy * dy <= r * r) { return n.id; }
+    }
+    return null;
+}
+
+canvas.addEventListener('click', function(e) {
+    var m = getMousePos(e);
+    var id = nodeAt(m.x, m.y);
+    activeNode = (id !== null) ? id : null;
+    draw();
+});
+
+canvas.addEventListener('mousemove', function(e) {
+    var m = getMousePos(e);
+    hoverNode = nodeAt(m.x, m.y);
+    draw();
+});
+
+canvas.addEventListener('wheel', function(e) {
+    e.preventDefault();
+    var factor = (e.deltaY < 0) ? 1.1 : 0.9;
+    scale = Math.min(8, Math.max(0.2, scale * factor));
+    draw();
+});
+
+var dragging = false, lastX = 0, lastY = 0;
+canvas.addEventListener('mousedown', function(e) {
+    var m = getMousePos(e);
+    if (nodeAt(m.x, m.y) !== null) { return; }
+    dragging = true; lastX = e.clientX; lastY = e.clientY;
+    canvas.style.cursor = 'grabbing';
+});
+window.addEventListener('mousemove', function(e) {
+    if (!dragging) { return; }
+    panX += e.clientX - lastX;
+    panY += e.clientY - lastY;
+    lastX = e.clientX; lastY = e.clientY;
+    draw();
+});
+window.addEventListener('mouseup', function() {
+    dragging = false; canvas.style.cursor = 'grab';
+});
+
+document.getElementById('cbAmount').addEventListener('change', function() {
+    showAmount = this.checked; draw();
+});
+document.getElementById('cbMerge').addEventListener('change', function() {
+    mergeEdges = this.checked;
+    currentEdges = mergeEdges ? edgesMer : edgesSep;
+    activeNode = null;
+    draw();
+});
+var titleText = document.getElementById('titleText');
+document.getElementById('titleInput').addEventListener('input', function() {
+    var v = this.value || '资金流向图';
+    titleText.textContent = v;
+    document.title = v;
+});
+document.getElementById('resetBtn').addEventListener('click', function() {
+    activeNode = null;
+    scale = 1; panX = 0; panY = 0;
+    draw();
+});
+
+window.addEventListener('resize', resizeCanvas);
+</script>
+</body>
+</html>'''
+
+
+html = generate_html(contract, custom_title.get(), show_amount.get(), merge_edges.get())
+with open('资金流向图.html', 'w', encoding='utf-8') as f:
+    f.write(html)
 if sys.stdout is not None:
-    print('已生成 资金流向图.json（数据契约，坐标已归一化到 [0,1]）。')
-
-degree_dict = {}
-for node in G.nodes():
-    neighbors = set(G.predecessors(node)) | set(G.successors(node))
-    degree_dict[node] = len(neighbors)
-
-base_size = 500
-scale = 300
-node_size = [base_size + scale * degree_dict[node] for node in G.nodes()]
-
-plt.rcParams['font.sans-serif'] = ['SimHei', 'Microsoft YaHei', 'WenQuanYi Micro Hei']
-plt.rcParams['axes.unicode_minus'] = False
-
-fig, ax = plt.subplots(figsize=(20, 16))
-plt.subplots_adjust(bottom=0.1)
-pos = nx.spring_layout(G, k=4, seed=42)
-
-node_list = list(G.nodes())
-node_colors = ['lightblue'] * len(node_list)
-node_edgecolors = ['black'] * len(node_list)
-node_linewidths = [0.8] * len(node_list)
-node_zorders = [1] * len(node_list)
-
-drawn_nodes = nx.draw_networkx_nodes(G, pos, node_size=node_size, node_color=node_colors,
-                       edgecolors=node_edgecolors, linewidths=node_linewidths, ax=ax)
-drawn_labels = nx.draw_networkx_labels(G, pos, font_size=10, ax=ax)
-
-for text in drawn_labels.values():
-    text.set_zorder(12)
-
-edge_lines = {}
-edge_texts = {}
-
-for u, v in G.edges():
-    edge_info = G[u][v]
-    etype = edge_info.get('etype', '')
-    weight = edge_info['weight']
-
-    if show_amount.get():
-        label = f'{etype} {weight:,.0f}' if etype else f'{weight:,.0f}'
-    else:
-        label = ''
-
-    rad = 0.0
-    if G.has_edge(v, u):
-        if u < v:
-            rad = 0.25
-        else:
-            rad = -0.25
-
-    line_list = nx.draw_networkx_edges(G, pos, edgelist=[(u, v)],
-                           connectionstyle=f'arc3, rad={rad}',
-                           arrowstyle='-|>', arrowsize=15,
-                           edge_color='gray', alpha=0.7, ax=ax)
-    edge_lines[(u, v)] = line_list[0]
-
-    if show_amount.get() and label:
-        x1, y1 = pos[u]
-        x2, y2 = pos[v]
-        dx, dy = x2 - x1, y2 - y1
-        length = (dx**2 + dy**2) ** 0.5
-        if length == 0:
-            continue
-        nx_dir = -dy / length
-        ny_dir = dx / length
-        offset = rad * length
-        xm = (x1 + x2) / 2 + offset * nx_dir
-        ym = (y1 + y2) / 2 + offset * ny_dir
-
-        text = ax.text(xm, ym, label, fontsize=8, color='darkred', ha='center', va='center',
-                bbox=dict(facecolor='white', alpha=0.8, edgecolor='none', boxstyle='round,pad=0.2'))
-        edge_texts[(u, v)] = text
-
-ax.axis('off')
-plt.title(custom_title.get(), fontsize=14)
-
-ax.text(0.02, 0.02, '资金流水走向分析工具Github@drpasserby(wlxc)', transform=ax.transAxes,
-        fontsize=15, color='#bbb', alpha=0.6, ha='left', va='bottom', zorder=20)
-
-initial_node_colors = node_colors.copy()
-initial_node_edgecolors = node_edgecolors.copy()
-initial_node_linewidths = node_linewidths.copy()
-initial_edge_alphas = {e: 0.7 for e in edge_lines}
-initial_text_alphas = {e: 1.0 for e in edge_texts}
-
-def reset_graph(event):
-    for i in range(len(node_list)):
-        node_colors[i] = initial_node_colors[i]
-        node_edgecolors[i] = initial_node_edgecolors[i]
-        node_linewidths[i] = initial_node_linewidths[i]
-        node_zorders[i] = 1
-
-    drawn_nodes.set_facecolor(node_colors)
-    drawn_nodes.set_edgecolor(node_edgecolors)
-    drawn_nodes.set_linewidth(node_linewidths)
-
-    for e, obj in edge_lines.items():
-        obj.set_alpha(initial_edge_alphas[e])
-        obj.set_zorder(1)
-    for e, text in edge_texts.items():
-        text.set_alpha(initial_text_alphas[e])
-        text.set_zorder(2)
-
-    for text in drawn_labels.values():
-        text.set_zorder(12)
-
-    fig.canvas.draw_idle()
-
-reset_ax = plt.axes([0.8, 0.02, 0.1, 0.04])
-reset_btn = Button(reset_ax, '重置')
-reset_btn.on_clicked(reset_graph)
-
-def on_node_click(event):
-    if event.inaxes != ax:
-        return
-
-    clicked_node = None
-    min_dist = float('inf')
-    for node, (x, y) in pos.items():
-        dist = ((event.xdata - x)**2 + (event.ydata - y)**2)**0.5
-        idx = node_list.index(node)
-        threshold = (node_size[idx] / 3.14)**0.5 * 0.015
-        if dist < threshold and dist < min_dist:
-            clicked_node = node
-            min_dist = dist
-
-    if clicked_node is None:
-        return
-
-    connected_nodes = set()
-    for neighbor in G.predecessors(clicked_node):
-        connected_nodes.add(neighbor)
-    for neighbor in G.successors(clicked_node):
-        connected_nodes.add(neighbor)
-    connected_nodes.add(clicked_node)
-
-    for i, node in enumerate(node_list):
-        if node == clicked_node:
-            node_colors[i] = 'orange'
-            node_edgecolors[i] = 'red'
-            node_linewidths[i] = 3.0
-            node_zorders[i] = 10
-        elif node in connected_nodes:
-            node_colors[i] = 'lightgreen'
-            node_edgecolors[i] = 'green'
-            node_linewidths[i] = 2.0
-            node_zorders[i] = 9
-        else:
-            node_colors[i] = 'lightgray'
-            node_edgecolors[i] = 'gray'
-            node_linewidths[i] = 0.5
-            node_zorders[i] = 1
-
-    drawn_nodes.set_facecolor(node_colors)
-    drawn_nodes.set_edgecolor(node_edgecolors)
-    drawn_nodes.set_linewidth(node_linewidths)
-
-    for text in drawn_labels.values():
-        text.set_zorder(12)
-
-    for (u, v), obj in edge_lines.items():
-        if u == clicked_node or v == clicked_node:
-            obj.set_alpha(1.0)
-            obj.set_zorder(9)
-        elif u in connected_nodes and v in connected_nodes:
-            obj.set_alpha(0.9)
-            obj.set_zorder(8)
-        else:
-            obj.set_alpha(0.15)
-            obj.set_zorder(1)
-
-    for (u, v), text in edge_texts.items():
-        if u == clicked_node or v == clicked_node:
-            text.set_alpha(1.0)
-            text.set_zorder(10)
-        elif u in connected_nodes and v in connected_nodes:
-            text.set_alpha(0.9)
-            text.set_zorder(9)
-        else:
-            text.set_alpha(0.3)
-            text.set_zorder(1)
-
-    fig.canvas.draw_idle()
-
-fig.canvas.mpl_connect('button_press_event', on_node_click)
-
-plt.show()
+    print('已生成 资金流向图.html，双击即可在浏览器中离线使用。')
