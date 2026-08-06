@@ -1,6 +1,6 @@
 """
 资金流水走向分析工具
-版本：1.1.0
+版本：1.1.1
 作者：wulvxinchen
 """
 
@@ -15,52 +15,15 @@ import networkx as nx
 from collections import defaultdict
 
 
-opt_root = tk.Tk()
-opt_root.title('生成选项')
-opt_root.geometry('360x280+600+400')
+# ================= 选择数据文件 =================
+root = tk.Tk()
+root.withdraw()  # 隐藏主窗口，直接弹出文件选择框
+file_path = filedialog.askopenfilename(
+    title='选择数据文件',
+    filetypes=[('Excel 文件', '*.xlsx;*.xls'), ('所有文件', '*.*')])
 
-show_amount = tk.BooleanVar(value=True)
-merge_edges = tk.BooleanVar(value=False)
-custom_title = tk.StringVar(value='演示图')
-file_path_var = tk.StringVar(value='未选择文件')
-
-tk.Label(opt_root, text='请选择绘图选项：', font=('', 10, 'bold')).pack(pady=5)
-
-cb1 = tk.Checkbutton(opt_root, text='显示金额', variable=show_amount)
-cb1.pack(anchor='w', padx=20, pady=3)
-
-cb2 = tk.Checkbutton(opt_root, text='收入/支出合并显示', variable=merge_edges)
-cb2.pack(anchor='w', padx=20, pady=3)
-
-tk.Label(opt_root, text='自定义标题：').pack(anchor='w', padx=20, pady=(8,0))
-title_entry = tk.Entry(opt_root, textvariable=custom_title, width=30)
-title_entry.pack(padx=20, pady=3)
-
-def choose_file():
-    path = filedialog.askopenfilename(
-        title='选择数据文件',
-        filetypes=[('Excel 文件', '*.xlsx;*.xls'), ('所有文件', '*.*')])
-    if path:
-        file_path_var.set(path)
-
-tk.Label(opt_root, text='数据文件：').pack(anchor='w', padx=20, pady=(8,0))
-file_frame = tk.Frame(opt_root)
-file_frame.pack(fill='x', padx=20, pady=3)
-tk.Button(file_frame, text='选择文件...', command=choose_file, width=12).pack(side='left')
-tk.Label(file_frame, textvariable=file_path_var, fg='gray', anchor='w', width=20).pack(side='left', padx=8)
-
-def confirm():
-    if file_path_var.get() == '未选择文件':
-        messagebox.showwarning('提示', '请先选择数据文件！')
-        return
-    opt_root.destroy()
-
-tk.Button(opt_root, text='开始生成', command=confirm, width=12).pack(pady=10)
-opt_root.mainloop()
-
-file_path = file_path_var.get()
-if file_path == '未选择文件':
-    sys.exit('未选择数据文件，程序退出。')
+if not file_path:
+    sys.exit()  # 用户取消选择，正常退出
 
 df = pd.read_excel(file_path, sheet_name='Sheet1', header=0)
 
@@ -282,7 +245,6 @@ body { margin:0; display:flex; flex-direction:column; align-items:center;
 #titleText { margin:8px 0 2px; font-size:20px; color:#333; }
 #canvas { border:1px solid #ccc; background:#fff; cursor:grab; }
 #legend { font-size:13px; color:#555; }
-#footer { color:#bbb; font-size:12px; margin:6px 0 14px; }
 </style>
 </head>
 <body>
@@ -296,7 +258,6 @@ body { margin:0; display:flex; flex-direction:column; align-items:center;
   <span style="color:#2e8b57;">——收入</span></span>
 </div>
 <canvas id="canvas"></canvas>
-<div id="footer">资金流水走向分析工具 Github@drpasserby(wlxc)</div>
 <script>
 var nodes = ''' + nodes_json + ''';
 var edgesSep = ''' + edges_sep_json + ''';
@@ -342,8 +303,17 @@ function nodeTotals(id) {
 function draw() {
     ctx.clearRect(0, 0, W, H);
     drawEdges();
+    drawWatermark();
     drawNodes();
     drawTooltip();
+}
+
+function drawWatermark() {
+    ctx.font = '2em Microsoft YaHei, SimHei';
+    ctx.fillStyle = '#ddd';
+    ctx.textAlign = 'right';
+    ctx.textBaseline = 'bottom';
+    ctx.fillText('资金流水走向分析工具 Github@drpasserby(WLXC)', W - 16, H - 12);
 }
 
 function drawArrow(x, y, angle, color, alpha) {
@@ -579,7 +549,7 @@ window.addEventListener('resize', resizeCanvas);
 </html>'''
 
 
-html = generate_html(contract, custom_title.get(), show_amount.get(), merge_edges.get())
+html = generate_html(contract)
 with open('资金流向图.html', 'w', encoding='utf-8') as f:
     f.write(html)
 if sys.stdout is not None:
