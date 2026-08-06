@@ -1,6 +1,6 @@
 """
 资金流水走向分析工具
-版本：1.1.1
+版本：1.1.2
 作者：wulvxinchen
 """
 
@@ -17,7 +17,18 @@ from collections import defaultdict
 
 # ================= 选择数据文件 =================
 root = tk.Tk()
-root.withdraw()  # 隐藏主窗口，直接弹出文件选择框
+root.withdraw()  # 隐藏主窗口
+
+# 使用提示：说明可读文件格式与表格内容格式
+messagebox.showinfo(
+    '使用提示',
+    '可读取的文件格式：Excel（.xlsx / .xls）\n'
+    '\n'
+    '表格内容格式（第 1 行为表头）：\n'
+    '用户方 | 支出/收入 | 客户方 | 金额（元）\n'
+    '\n'
+    '点击“确定”后选择数据文件。')
+
 file_path = filedialog.askopenfilename(
     title='选择数据文件',
     filetypes=[('Excel 文件', '*.xlsx;*.xls'), ('所有文件', '*.*')])
