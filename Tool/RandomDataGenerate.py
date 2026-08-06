@@ -27,7 +27,7 @@ people = list(people)
 
 
 records = []
-for _ in range(100):
+for _ in range(200):
     a = random.choice(people)
     c = random.choice(people)
 
