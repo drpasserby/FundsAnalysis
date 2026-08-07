@@ -1,6 +1,6 @@
 """
 资金流水走向分析工具
-版本：1.1.2
+版本：1.1.3
 作者：wulvxinchen
 """
 
@@ -227,9 +227,9 @@ contract = build_contract(G_sep, G_mer)
 
 
 # ================= HTML 输出（自包含交互式查看器） =================
-def generate_html(contract, title='演示图', show_amount=True, merge_edges=False):
+def generate_html(contract, title='演示图', show_amount=True, merge_edges=False, hide_other=False):
     """生成自包含的交互式 HTML：数据内嵌、离线可用、兼容旧浏览器（ES5 语法）。
-    页面内可实时切换：显示金额 / 合并收支 / 自定义标题；
+    页面内可实时切换：显示金额 / 合并收支 / 隐藏其他 / 自定义标题；
     支持点击高亮、悬浮提示、滚轮缩放、拖拽平移、重置。
     """
     nodes_json = json.dumps(contract['nodes'], ensure_ascii=False).replace('</', '<\\/')
@@ -239,8 +239,10 @@ def generate_html(contract, title='演示图', show_amount=True, merge_edges=Fal
                        .replace('>', '&gt;').replace('"', '&quot;'))
     amt_checked = ' checked' if show_amount else ''
     merge_checked = ' checked' if merge_edges else ''
+    hide_checked = ' checked' if hide_other else ''
     show_js = 'true' if show_amount else 'false'
     merge_js = 'true' if merge_edges else 'false'
+    hide_js = 'true' if hide_other else 'false'
 
     return '''<!DOCTYPE html>
 <html lang="zh-CN">
@@ -263,6 +265,7 @@ body { margin:0; display:flex; flex-direction:column; align-items:center;
 <div id="controls">
   <label><input type="checkbox" id="cbAmount"''' + amt_checked + '''> 显示金额</label>
   <label><input type="checkbox" id="cbMerge"''' + merge_checked + '''> 收入/支出合并显示</label>
+  <label title="开启后点击某个圆圈，只显示该用户及其直接关联的圆圈和连线"><input type="checkbox" id="cbHideOther"''' + hide_checked + '''> 隐藏其他</label>
   <span>标题：<input type="text" id="titleInput" value="''' + safe_title + '''"></span>
   <button id="resetBtn" type="button">重置</button>
   <span id="legend"><span style="color:#c0392b;">——支出</span>
@@ -278,6 +281,7 @@ var scale = 1, panX = 0, panY = 0;
 var activeNode = null, hoverNode = null;
 var showAmount = ''' + show_js + ''';
 var mergeEdges = ''' + merge_js + ''';
+var hideOthers = ''' + hide_js + ''';
 var currentEdges = mergeEdges ? edgesMer : edgesSep;
 var canvas = document.getElementById('canvas');
 var ctx = canvas.getContext('2d');
@@ -354,6 +358,7 @@ function drawEdges() {
     if (activeNode !== null) { connected = Object.create(null); connected[activeNode] = true; }
     for (var i = 0; i < currentEdges.length; i++) {
         var e = currentEdges[i];
+        if (hideOthers && activeNode !== null && e.source !== activeNode && e.target !== activeNode) { continue; }
         var sn = nodeIndex[e.source];
         var tn = nodeIndex[e.target];
         if (!sn || !tn) { continue; }
@@ -417,19 +422,24 @@ function drawEdges() {
     }
 }
 
+function buildConnected() {
+    var conn = Object.create(null);
+    if (activeNode === null) { return conn; }
+    for (var i = 0; i < currentEdges.length; i++) {
+        var e = currentEdges[i];
+        if (e.source === activeNode) { conn[e.target] = true; }
+        if (e.target === activeNode) { conn[e.source] = true; }
+    }
+    conn[activeNode] = true;
+    return conn;
+}
+
 function drawNodes() {
     var connected = null;
-    if (activeNode !== null) {
-        connected = Object.create(null);
-        for (var i = 0; i < currentEdges.length; i++) {
-            var e = currentEdges[i];
-            if (e.source === activeNode) { connected[e.target] = true; }
-            if (e.target === activeNode) { connected[e.source] = true; }
-        }
-        connected[activeNode] = true;
-    }
+    if (activeNode !== null) { connected = buildConnected(); }
     for (var j = 0; j < nodes.length; j++) {
         var n = nodes[j];
+        if (hideOthers && connected !== null && !connected[n.id]) { continue; }
         var cx = px(n), cy = py(n);
         var r = n.size * scale;
         var fill = '#dbe9fb', border = '#333', bw = 0.8;
@@ -485,8 +495,10 @@ function getMousePos(e) {
 }
 
 function nodeAt(mx, my) {
+    var conn = (hideOthers && activeNode !== null) ? buildConnected() : null;
     for (var i = 0; i < nodes.length; i++) {
         var n = nodes[i];
+        if (conn !== null && !conn[n.id]) { continue; }
         var cx = px(n), cy = py(n);
         var r = n.size * scale + 2;
         var dx = mx - cx, dy = my - cy;
@@ -540,6 +552,10 @@ document.getElementById('cbMerge').addEventListener('change', function() {
     mergeEdges = this.checked;
     currentEdges = mergeEdges ? edgesMer : edgesSep;
     activeNode = null;
+    draw();
+});
+document.getElementById('cbHideOther').addEventListener('change', function() {
+    hideOthers = this.checked;
     draw();
 });
 var titleText = document.getElementById('titleText');
