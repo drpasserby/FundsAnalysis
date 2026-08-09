@@ -1,6 +1,6 @@
 """
 资金流水走向分析工具
-版本：1.1.3
+版本：1.1.4
 作者：wulvxinchen
 """
 
@@ -10,6 +10,7 @@ from tkinter import filedialog
 from tkinter import messagebox
 import sys
 import json
+import math
 import pandas as pd
 import networkx as nx
 from collections import defaultdict
@@ -156,9 +157,10 @@ G_sep, G_mer = build_graphs(df)
 # ================= 数据契约（供 HTML 渲染使用） =================
 def build_contract(G_sep, G_mer):
     """生成 HTML 端使用的数据契约：坐标归一化到 [0,1]，节点大小设上限。
+    布局后做重叠消除，配合 HTML 端的半径缩放，任意窗口尺寸下圆圈互不遮挡。
     返回 {'nodes': [...], 'edgesSep': [...], 'edgesMer': [...]}
     """
-    all_nodes = list(set(G_sep.nodes()) | set(G_mer.nodes()))
+    all_nodes = sorted(set(G_sep.nodes()) | set(G_mer.nodes()))
 
     pos = nx.spring_layout(G_sep, k=4, seed=42) if len(G_sep.nodes()) > 0 else {}
 
@@ -167,6 +169,19 @@ def build_contract(G_sep, G_mer):
         pred = set(G_sep.predecessors(node)) if node in G_sep else set()
         succ = set(G_sep.successors(node)) if node in G_sep else set()
         degree_dict[node] = len(pred | succ)
+
+    # 节点大小：基础值 + 度 * 缩放，设上限防止枢纽节点过大
+    base_size = 500
+    scale = 300
+    max_size = 3000
+    size_dict = {n: min(base_size + scale * degree_dict[n], max_size) for n in all_nodes}
+    max_s = max(size_dict.values()) if size_dict else 1
+    min_s = min(size_dict.values()) if size_dict else 1
+
+    display_s = {}
+    for n in all_nodes:
+        raw_s = size_dict[n]
+        display_s[n] = 15 + (raw_s - min_s) / (max_s - min_s) * 40 if max_s != min_s else 30
 
     # 坐标归一化到 [0,1]
     xs = [pos[n][0] for n in all_nodes if n in pos]
@@ -181,24 +196,103 @@ def build_contract(G_sep, G_mer):
     else:
         minx, maxx, miny, maxy = 0, 1, 0, 1
 
-    # 节点大小：基础值 + 度 * 缩放，设上限防止枢纽节点过大
-    base_size = 500
-    scale = 300
-    max_size = 3000
-    size_dict = {n: min(base_size + scale * degree_dict[n], max_size) for n in all_nodes}
-    max_s = max(size_dict.values()) if size_dict else 1
-    min_s = min(size_dict.values()) if size_dict else 1
+    pos_norm = {}
+    for node in all_nodes:
+        if node in pos:
+            pos_norm[node] = [float((pos[node][0] - minx) / (maxx - minx)),
+                              float((pos[node][1] - miny) / (maxy - miny))]
+        else:
+            pos_norm[node] = [0.5, 0.5]
+
+    # 密度自适应：圆圈总面积超过画布可用比例时整体缩小，保证任意规模都可不重叠布局
+    ref_size = 700.0
+    max_frac = 0.35
+    total_area = sum(math.pi * (display_s[n] / ref_size) ** 2 for n in all_nodes)
+    if total_area > max_frac:
+        shrink = (max_frac / total_area) ** 0.5
+        for n in all_nodes:
+            display_s[n] *= shrink
+
+    # 重叠消除：按参考画布最小边 700px 折算节点半径（与 HTML 端 radiusScale 同源），
+    # 迭代把互相遮挡的节点对推开，每轮后整体重新归一化回画布内，直至无重叠。
+    # 配合 HTML 端的半径缩放，保证任意窗口/屏幕尺寸下圆圈互不遮挡名字。
+    radius_norm = {n: display_s[n] / ref_size for n in all_nodes}
+    if len(all_nodes) <= 400:
+        def push_pass(margin):
+            """一轮推离：距离小于阈值(半径和×margin)的节点对互相推开。返回是否发生移动。"""
+            moved = False
+            for i in range(len(all_nodes)):
+                for j in range(i + 1, len(all_nodes)):
+                    ni, nj = all_nodes[i], all_nodes[j]
+                    dx = pos_norm[nj][0] - pos_norm[ni][0]
+                    dy = pos_norm[nj][1] - pos_norm[ni][1]
+                    dist2 = dx * dx + dy * dy
+                    min_dist = (radius_norm[ni] + radius_norm[nj]) * margin
+                    if dist2 < min_dist * min_dist:
+                        dist = dist2 ** 0.5 or 1e-9
+                        push = (min_dist - dist) / 2 * 1.2  # 过松弛，加快收敛
+                        ux, uy = dx / dist, dy / dist
+                        pos_norm[ni][0] -= ux * push
+                        pos_norm[ni][1] -= uy * push
+                        pos_norm[nj][0] += ux * push
+                        pos_norm[nj][1] += uy * push
+                        moved = True
+            return moved
+
+        # 主循环：推离 + 每轮整体归一化回画布内（目标留有 10% 缓冲，抵消归一化的回挤）
+        for _ in range(100):
+            if not push_pass(1.02 * 1.10):
+                break
+            xs = [pos_norm[n][0] for n in all_nodes]
+            ys = [pos_norm[n][1] for n in all_nodes]
+            cminx, cmaxx = min(xs), max(xs)
+            cminy, cmaxy = min(ys), max(ys)
+            if cmaxx - cminx == 0:
+                cmaxx = cminx + 1
+            if cmaxy - cminy == 0:
+                cmaxy = cminy + 1
+            for n in all_nodes:
+                pos_norm[n][0] = 0.02 + 0.96 * (pos_norm[n][0] - cminx) / (cmaxx - cminx)
+                pos_norm[n][1] = 0.02 + 0.96 * (pos_norm[n][1] - cminy) / (cmaxy - cminy)
+        # 收尾：不再整体归一化，按重叠严重程度优先处理，打破环形相切链
+        for _ in range(200):
+            pairs = []
+            for i in range(len(all_nodes)):
+                for j in range(i + 1, len(all_nodes)):
+                    ni, nj = all_nodes[i], all_nodes[j]
+                    dx = pos_norm[nj][0] - pos_norm[ni][0]
+                    dy = pos_norm[nj][1] - pos_norm[ni][1]
+                    dist = (dx * dx + dy * dy) ** 0.5
+                    min_dist = (radius_norm[ni] + radius_norm[nj]) * 1.02
+                    if dist < min_dist:
+                        pairs.append((min_dist - dist, ni, nj))
+            if not pairs:
+                break
+            pairs.sort(reverse=True)
+            done = 0
+            for _, ni, nj in pairs:
+                dx = pos_norm[nj][0] - pos_norm[ni][0]
+                dy = pos_norm[nj][1] - pos_norm[ni][1]
+                dist = (dx * dx + dy * dy) ** 0.5 or 1e-9
+                min_dist = (radius_norm[ni] + radius_norm[nj]) * 1.02
+                if dist < min_dist:
+                    push = (min_dist - dist) / 2 * 1.3
+                    ux, uy = dx / dist, dy / dist
+                    pos_norm[ni][0] -= ux * push
+                    pos_norm[ni][1] -= uy * push
+                    pos_norm[nj][0] += ux * push
+                    pos_norm[nj][1] += uy * push
+                    done += 1
+            if done == 0:
+                break
+        for n in all_nodes:
+            pos_norm[n][0] = min(0.98, max(0.02, pos_norm[n][0]))
+            pos_norm[n][1] = min(0.98, max(0.02, pos_norm[n][1]))
 
     nodes_json = []
     for node in all_nodes:
-        if node in pos:
-            x = float((pos[node][0] - minx) / (maxx - minx))
-            y = float((pos[node][1] - miny) / (maxy - miny))
-        else:
-            x, y = 0.5, 0.5
-        raw_s = size_dict[node]
-        display_s = 15 + (raw_s - min_s) / (max_s - min_s) * 40 if max_s != min_s else 30
-        nodes_json.append({'id': node, 'x': x, 'y': y, 'size': display_s, 'degree': degree_dict[node]})
+        x, y = pos_norm[node]
+        nodes_json.append({'id': node, 'x': x, 'y': y, 'size': display_s[node], 'degree': degree_dict[node]})
 
     def edge_list(G):
         edges = []
@@ -277,6 +371,7 @@ var nodes = ''' + nodes_json + ''';
 var edgesSep = ''' + edges_sep_json + ''';
 var edgesMer = ''' + edges_mer_json + ''';
 var PADDING = 80;
+var radiusScale = 1;  // 节点半径随画布最小边缩放，防止不同窗口尺寸下圆圈互相遮挡
 var scale = 1, panX = 0, panY = 0;
 var activeNode = null, hoverNode = null;
 var showAmount = ''' + show_js + ''';
@@ -296,6 +391,7 @@ function resizeCanvas() {
     canvas.width = Math.max(600, w);
     canvas.height = Math.max(400, h);
     W = canvas.width; H = canvas.height;
+    radiusScale = (Math.min(W, H) - 2 * PADDING) / 700;
     draw();
 }
 resizeCanvas();
@@ -437,11 +533,12 @@ function buildConnected() {
 function drawNodes() {
     var connected = null;
     if (activeNode !== null) { connected = buildConnected(); }
+    // 第一轮：画所有圆圈
     for (var j = 0; j < nodes.length; j++) {
         var n = nodes[j];
         if (hideOthers && connected !== null && !connected[n.id]) { continue; }
         var cx = px(n), cy = py(n);
-        var r = n.size * scale;
+        var r = n.size * scale * radiusScale;
         var fill = '#dbe9fb', border = '#333', bw = 0.8;
         if (activeNode !== null) {
             if (n.id === activeNode) { fill = '#f39c12'; border = '#c0392b'; bw = 3; }
@@ -455,11 +552,17 @@ function drawNodes() {
         ctx.strokeStyle = border;
         ctx.lineWidth = bw;
         ctx.stroke();
-        ctx.font = '12px Microsoft YaHei, SimHei';
-        ctx.fillStyle = '#000';
-        ctx.textAlign = 'center';
-        ctx.textBaseline = 'middle';
-        ctx.fillText(n.id, cx, cy);
+    }
+    // 第二轮：所有名字最后画，保证不被任何圆圈遮挡，信息完整可读
+    var labelFont = Math.max(9, Math.round(12 * radiusScale)) + 'px Microsoft YaHei, SimHei';
+    ctx.font = labelFont;
+    ctx.fillStyle = '#000';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    for (var k = 0; k < nodes.length; k++) {
+        var n2 = nodes[k];
+        if (hideOthers && connected !== null && !connected[n2.id]) { continue; }
+        ctx.fillText(n2.id, px(n2), py(n2));
     }
 }
 
@@ -500,7 +603,7 @@ function nodeAt(mx, my) {
         var n = nodes[i];
         if (conn !== null && !conn[n.id]) { continue; }
         var cx = px(n), cy = py(n);
-        var r = n.size * scale + 2;
+        var r = n.size * scale * radiusScale + 2;
         var dx = mx - cx, dy = my - cy;
         if (dx * dx + dy * dy <= r * r) { return n.id; }
     }
