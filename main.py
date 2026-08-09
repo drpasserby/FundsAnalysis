@@ -1,9 +1,8 @@
 """
 资金流水走向分析工具
-版本：1.1.4
+版本：1.1.5
 作者：wulvxinchen
 """
-
 
 import tkinter as tk
 from tkinter import filedialog
@@ -324,6 +323,7 @@ contract = build_contract(G_sep, G_mer)
 def generate_html(contract, title='演示图', show_amount=True, merge_edges=False, hide_other=False):
     """生成自包含的交互式 HTML：数据内嵌、离线可用、兼容旧浏览器（ES5 语法）。
     页面内可实时切换：显示金额 / 合并收支 / 隐藏其他 / 自定义标题；
+    画布占窗口 80%×80%，右下角提供放大/缩小按钮；
     支持点击高亮、悬浮提示、滚轮缩放、拖拽平移、重置。
     """
     nodes_json = json.dumps(contract['nodes'], ensure_ascii=False).replace('</', '<\\/')
@@ -350,7 +350,14 @@ body { margin:0; display:flex; flex-direction:column; align-items:center;
 #controls { margin:12px 0 4px; display:flex; flex-wrap:wrap; align-items:center; gap:14px; font-size:14px; }
 #controls label { cursor:pointer; }
 #titleText { margin:8px 0 2px; font-size:20px; color:#333; }
+#canvasWrap { position:relative; }
 #canvas { border:1px solid #ccc; background:#fff; cursor:grab; }
+#zoomBtns { position:absolute; right:10px; bottom:10px; display:flex; flex-direction:column; gap:6px; }
+#zoomBtns button { width:36px; height:36px; font-size:24px; line-height:1; cursor:pointer;
+                   border:1px solid #bbb; border-radius:4px; background:#fff; color:#333;
+                   user-select:none; }
+#zoomBtns button:hover { background:#f0f0f0; }
+#zoomBtns button:active { background:#e0e0e0; }
 #legend { font-size:13px; color:#555; }
 </style>
 </head>
@@ -365,7 +372,13 @@ body { margin:0; display:flex; flex-direction:column; align-items:center;
   <span id="legend"><span style="color:#c0392b;">——支出</span>
   <span style="color:#2e8b57;">——收入</span></span>
 </div>
+<div id="canvasWrap">
 <canvas id="canvas"></canvas>
+<div id="zoomBtns">
+  <button id="zoomIn" type="button" title="放大">+</button>
+  <button id="zoomOut" type="button" title="缩小">−</button>
+</div>
+</div>
 <script>
 var nodes = ''' + nodes_json + ''';
 var edgesSep = ''' + edges_sep_json + ''';
@@ -386,8 +399,8 @@ var nodeIndex = Object.create(null);
 for (var k = 0; k < nodes.length; k++) { nodeIndex[nodes[k].id] = nodes[k]; }
 
 function resizeCanvas() {
-    var w = Math.min(1400, (window.innerWidth || 1200) - 40);
-    var h = Math.min(900, (window.innerHeight || 800) - 130);
+    var w = Math.round((window.innerWidth || 1200) * 0.8);
+    var h = Math.round((window.innerHeight || 800) * 0.8);
     canvas.width = Math.max(600, w);
     canvas.height = Math.max(400, h);
     W = canvas.width; H = canvas.height;
@@ -420,11 +433,11 @@ function draw() {
 }
 
 function drawWatermark() {
-    ctx.font = '2em Microsoft YaHei, SimHei';
+    ctx.font = '1.5em Microsoft YaHei, SimHei';
     ctx.fillStyle = '#ddd';
-    ctx.textAlign = 'right';
+    ctx.textAlign = 'left';
     ctx.textBaseline = 'bottom';
-    ctx.fillText('资金流水走向分析工具 Github@drpasserby(WLXC)', W - 16, H - 12);
+    ctx.fillText('资金流水走向分析工具 Github@drpasserby(WLXC)', 16, H - 12);
 }
 
 function drawArrow(x, y, angle, color, alpha) {
@@ -670,6 +683,14 @@ document.getElementById('titleInput').addEventListener('input', function() {
 document.getElementById('resetBtn').addEventListener('click', function() {
     activeNode = null;
     scale = 1; panX = 0; panY = 0;
+    draw();
+});
+document.getElementById('zoomIn').addEventListener('click', function() {
+    scale = Math.min(8, scale * 1.25);
+    draw();
+});
+document.getElementById('zoomOut').addEventListener('click', function() {
+    scale = Math.max(0.2, scale / 1.25);
     draw();
 });
 
