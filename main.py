@@ -1,6 +1,6 @@
 """
 资金流水走向分析工具
-版本：1.1.5
+版本：1.1.6
 作者：wulvxinchen
 """
 
@@ -320,11 +320,11 @@ contract = build_contract(G_sep, G_mer)
 
 
 # ================= HTML 输出（自包含交互式查看器） =================
-def generate_html(contract, title='演示图', show_amount=True, merge_edges=False, hide_other=False):
+def generate_html(contract, title='资金流水分析演示图', show_amount=True, merge_edges=False, hide_other=True):
     """生成自包含的交互式 HTML：数据内嵌、离线可用、兼容旧浏览器（ES5 语法）。
-    页面内可实时切换：显示金额 / 合并收支 / 隐藏其他 / 自定义标题；
-    画布占窗口 80%×80%，右下角提供放大/缩小按钮；
-    支持点击高亮、悬浮提示、滚轮缩放、拖拽平移、重置。
+    三个开关（显示金额 / 合并收支 / 隐藏其他）与标题输入收纳在设置面板中，
+    通过画布右下角齿轮按钮打开；右下角另提供刷新按钮恢复初始视图，
+    放大/缩小按钮控制内部图形缩放；支持点击高亮、悬浮提示、滚轮缩放、拖拽平移。
     """
     nodes_json = json.dumps(contract['nodes'], ensure_ascii=False).replace('</', '<\\/')
     edges_sep_json = json.dumps(contract['edgesSep'], ensure_ascii=False).replace('</', '<\\/')
@@ -358,23 +358,39 @@ body { margin:0; display:flex; flex-direction:column; align-items:center;
                    user-select:none; }
 #zoomBtns button:hover { background:#f0f0f0; }
 #zoomBtns button:active { background:#e0e0e0; }
+#settingsPanel { display:none; position:absolute; top:0; left:0; right:0; bottom:0;
+                 background:rgba(0,0,0,0.25); z-index:10; }
+#settingsBox { position:absolute; top:50%; left:50%; transform:translate(-50%,-50%);
+               background:#fff; border:1px solid #ccc; border-radius:6px; padding:16px 20px;
+               font-size:14px; color:#333; box-shadow:0 4px 16px rgba(0,0,0,0.2); }
+#settingsTitle { font-size:16px; font-weight:bold; margin-bottom:8px; }
+#settingsBox label { display:block; margin:8px 0; cursor:pointer; }
+#settingsBox #titleRow { margin:8px 0; }
+#settingsClose { margin-top:12px; padding:4px 16px; cursor:pointer; }
 #legend { font-size:13px; color:#555; }
 </style>
 </head>
 <body>
 <h2 id="titleText">''' + safe_title + '''</h2>
 <div id="controls">
-  <label><input type="checkbox" id="cbAmount"''' + amt_checked + '''> 显示金额</label>
-  <label><input type="checkbox" id="cbMerge"''' + merge_checked + '''> 收入/支出合并显示</label>
-  <label title="开启后点击某个圆圈，只显示该用户及其直接关联的圆圈和连线"><input type="checkbox" id="cbHideOther"''' + hide_checked + '''> 隐藏其他</label>
-  <span>标题：<input type="text" id="titleInput" value="''' + safe_title + '''"></span>
-  <button id="resetBtn" type="button">重置</button>
   <span id="legend"><span style="color:#c0392b;">——支出</span>
   <span style="color:#2e8b57;">——收入</span></span>
 </div>
 <div id="canvasWrap">
 <canvas id="canvas"></canvas>
+<div id="settingsPanel">
+  <div id="settingsBox">
+    <div id="settingsTitle">设置</div>
+    <label><input type="checkbox" id="cbAmount"''' + amt_checked + '''> 显示金额</label>
+    <label><input type="checkbox" id="cbMerge"''' + merge_checked + '''> 收入/支出合并显示</label>
+    <label title="开启后点击某个圆圈，只显示该用户及其直接关联的圆圈和连线"><input type="checkbox" id="cbHideOther"''' + hide_checked + '''> 隐藏其他</label>
+    <div id="titleRow">标题：<input type="text" id="titleInput" value="''' + safe_title + '''"></div>
+    <button id="settingsClose" type="button">关闭</button>
+  </div>
+</div>
 <div id="zoomBtns">
+  <button id="refreshBtn" type="button" title="刷新">↻</button>
+  <button id="settingsBtn" type="button" title="设置">⚙</button>
   <button id="zoomIn" type="button" title="放大">+</button>
   <button id="zoomOut" type="button" title="缩小">−</button>
 </div>
@@ -680,10 +696,20 @@ document.getElementById('titleInput').addEventListener('input', function() {
     titleText.textContent = v;
     document.title = v;
 });
-document.getElementById('resetBtn').addEventListener('click', function() {
+document.getElementById('refreshBtn').addEventListener('click', function() {
     activeNode = null;
     scale = 1; panX = 0; panY = 0;
     draw();
+});
+var settingsPanel = document.getElementById('settingsPanel');
+document.getElementById('settingsBtn').addEventListener('click', function() {
+    settingsPanel.style.display = (settingsPanel.style.display === 'block') ? 'none' : 'block';
+});
+document.getElementById('settingsClose').addEventListener('click', function() {
+    settingsPanel.style.display = 'none';
+});
+settingsPanel.addEventListener('click', function(e) {
+    if (e.target === settingsPanel) { settingsPanel.style.display = 'none'; }
 });
 document.getElementById('zoomIn').addEventListener('click', function() {
     scale = Math.min(8, scale * 1.25);
@@ -700,7 +726,7 @@ window.addEventListener('resize', resizeCanvas);
 </html>'''
 
 
-html = generate_html(contract)
+html = generate_html(contract, title='资金流水分析演示图', hide_other=True)
 with open('资金流向图.html', 'w', encoding='utf-8') as f:
     f.write(html)
 if sys.stdout is not None:
