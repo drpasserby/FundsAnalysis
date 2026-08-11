@@ -1,6 +1,6 @@
 """
 资金流水走向分析工具
-版本：1.1.6
+版本：1.1.7
 作者：wulvxinchen
 """
 
@@ -325,6 +325,8 @@ def generate_html(contract, title='资金流水分析演示图', show_amount=Tru
     三个开关（显示金额 / 合并收支 / 隐藏其他）与标题输入收纳在设置面板中，
     通过画布右下角齿轮按钮打开；右下角另提供刷新按钮恢复初始视图，
     放大/缩小按钮控制内部图形缩放；支持点击高亮、悬浮提示、滚轮缩放、拖拽平移。
+    点击某用户后，画布下方以表格展示其与其他人员的交易详情（交易类型/客户方/金额），
+    不点击则不显示任何信息。
     """
     nodes_json = json.dumps(contract['nodes'], ensure_ascii=False).replace('</', '<\\/')
     edges_sep_json = json.dumps(contract['edgesSep'], ensure_ascii=False).replace('</', '<\\/')
@@ -367,6 +369,14 @@ body { margin:0; display:flex; flex-direction:column; align-items:center;
 #settingsBox label { display:block; margin:8px 0; cursor:pointer; }
 #settingsBox #titleRow { margin:8px 0; }
 #settingsClose { margin-top:12px; padding:4px 16px; cursor:pointer; }
+#detailPanel { display:none; margin:16px auto 40px; width:80%; max-width:1000px;
+               min-width:400px; font-size:14px; color:#333; }
+#detailTitle { text-align:center; font-size:17px; margin:0 0 10px; }
+#detailTable { border-collapse:collapse; width:100%; background:#fff; }
+#detailTable th, #detailTable td { border:1px solid #dcdcdc; padding:7px 14px; text-align:center; }
+#detailTable th { background:#f0f4f8; color:#333; font-weight:bold; }
+#detailTable tbody tr:nth-child(even) { background:#fafafa; }
+#detailTable tbody tr:hover { background:#f0f7ff; }
 #legend { font-size:13px; color:#555; }
 </style>
 </head>
@@ -394,6 +404,13 @@ body { margin:0; display:flex; flex-direction:column; align-items:center;
   <button id="zoomIn" type="button" title="放大">+</button>
   <button id="zoomOut" type="button" title="缩小">−</button>
 </div>
+</div>
+<div id="detailPanel">
+  <h3 id="detailTitle">用户与其他人员的交易详情</h3>
+  <table id="detailTable">
+    <thead><tr><th>交易类型</th><th>客户方</th><th>金额</th></tr></thead>
+    <tbody id="detailBody"></tbody>
+  </table>
 </div>
 <script>
 var nodes = ''' + nodes_json + ''';
@@ -446,6 +463,37 @@ function draw() {
     drawWatermark();
     drawNodes();
     drawTooltip();
+    renderDetail();
+}
+
+function esc(s) {
+    return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+function renderDetail() {
+    var panel = document.getElementById('detailPanel');
+    if (activeNode === null) { panel.style.display = 'none'; return; }
+    var rows = [];
+    for (var i = 0; i < currentEdges.length; i++) {
+        var e = currentEdges[i];
+        if (e.source === activeNode || e.target === activeNode) {
+            var other = (e.source === activeNode) ? e.target : e.source;
+            rows.push({ type: e.type || '', other: other, amount: e.amount });
+        }
+    }
+    rows.sort(function(a, b) { return b.amount - a.amount; });
+    document.getElementById('detailTitle').textContent = '用户' + activeNode + '与其他人员的交易详情';
+    var html = '';
+    for (var j = 0; j < rows.length; j++) {
+        var r = rows[j];
+        var color = (r.type === '收入') ? '#2e8b57' : '#c0392b';
+        html += '<tr><td style="color:' + color + ';">' + esc(r.type) + '</td><td>' + esc(r.other) + '</td><td>' + fmt(r.amount) + '</td></tr>';
+    }
+    if (rows.length === 0) {
+        html += '<tr><td colspan="3" style="color:#999;">暂无交易记录</td></tr>';
+    }
+    document.getElementById('detailBody').innerHTML = html;
+    panel.style.display = 'block';
 }
 
 function drawWatermark() {
