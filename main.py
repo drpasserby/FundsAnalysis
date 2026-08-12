@@ -1,6 +1,6 @@
 """
 资金流水走向分析工具
-版本：1.1.7
+版本：1.1.8
 作者：wulvxinchen
 """
 
@@ -321,10 +321,12 @@ contract = build_contract(G_sep, G_mer)
 
 # ================= HTML 输出（自包含交互式查看器） =================
 def generate_html(contract, title='资金流水分析演示图', show_amount=True, merge_edges=False, hide_other=True):
-    """生成自包含的交互式 HTML：数据内嵌、离线可用、兼容旧浏览器（ES5 语法）。
+    """生成自包含的交互式 HTML：数据内嵌、离线可用（JS 保持 ES5 兼容旧浏览器）。
+    用户界面遵循 Apple iOS 设计语言：系统字体、毛玻璃、圆角卡片、深浅色自适应、
+    弹簧动画、层级阴影、安全区适配与无障碍标签。
     三个开关（显示金额 / 合并收支 / 隐藏其他）与标题输入收纳在设置面板中，
-    通过画布右下角齿轮按钮打开；右下角另提供刷新按钮恢复初始视图，
-    放大/缩小按钮控制内部图形缩放；支持点击高亮、悬浮提示、滚轮缩放、拖拽平移。
+    通过画布右下角齿轮按钮打开（底部弹窗形式）；右下角另提供刷新按钮恢复初始视图，
+    放大/缩小按钮控制内部图形缩放；支持点击高亮、悬浮提示、滚轮缩放、拖拽平移及触屏手势。
     点击某用户后，画布下方以表格展示其与其他人员的交易详情（交易类型/客户方/金额），
     不点击则不显示任何信息。
     """
@@ -347,63 +349,177 @@ def generate_html(contract, title='资金流水分析演示图', show_amount=Tru
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>资金流向图</title>
 <style>
-body { margin:0; display:flex; flex-direction:column; align-items:center;
-       font-family:'Microsoft YaHei','SimHei',sans-serif; background:#fafafa; }
-#controls { margin:12px 0 4px; display:flex; flex-wrap:wrap; align-items:center; gap:14px; font-size:14px; }
-#controls label { cursor:pointer; }
-#titleText { margin:8px 0 2px; font-size:20px; color:#333; }
-#canvasWrap { position:relative; }
-#canvas { border:1px solid #ccc; background:#fff; cursor:grab; }
-#zoomBtns { position:absolute; right:10px; bottom:10px; display:flex; flex-direction:column; gap:6px; }
-#zoomBtns button { width:36px; height:36px; font-size:24px; line-height:1; cursor:pointer;
-                   border:1px solid #bbb; border-radius:4px; background:#fff; color:#333;
-                   user-select:none; }
-#zoomBtns button:hover { background:#f0f0f0; }
-#zoomBtns button:active { background:#e0e0e0; }
-#settingsPanel { display:none; position:absolute; top:0; left:0; right:0; bottom:0;
-                 background:rgba(0,0,0,0.25); z-index:10; }
-#settingsBox { position:absolute; top:50%; left:50%; transform:translate(-50%,-50%);
-               background:#fff; border:1px solid #ccc; border-radius:6px; padding:16px 20px;
-               font-size:14px; color:#333; box-shadow:0 4px 16px rgba(0,0,0,0.2); }
-#settingsTitle { font-size:16px; font-weight:bold; margin-bottom:8px; }
-#settingsBox label { display:block; margin:8px 0; cursor:pointer; }
-#settingsBox #titleRow { margin:8px 0; }
-#settingsClose { margin-top:12px; padding:4px 16px; cursor:pointer; }
-#detailPanel { display:none; margin:16px auto 40px; width:80%; max-width:1000px;
-               min-width:400px; font-size:14px; color:#333; }
-#detailTitle { text-align:center; font-size:17px; margin:0 0 10px; }
-#detailTable { border-collapse:collapse; width:100%; background:#fff; }
-#detailTable th, #detailTable td { border:1px solid #dcdcdc; padding:7px 14px; text-align:center; }
-#detailTable th { background:#f0f4f8; color:#333; font-weight:bold; }
-#detailTable tbody tr:nth-child(even) { background:#fafafa; }
-#detailTable tbody tr:hover { background:#f0f7ff; }
-#legend { font-size:13px; color:#555; }
+:root {
+  color-scheme: light dark;
+  --bg: #f2f2f7;
+  --card-solid: #ffffff;
+  --glass-bg: rgba(255,255,255,0.78);
+  --text: #1c1c1e;
+  --text-2: #8e8e93;
+  --separator: rgba(60,60,67,0.29);
+  --fill: rgba(120,120,128,0.12);
+  --tint: #007aff;
+  --income: #34c759;
+  --expense: #ff3b30;
+  --shadow-sm: 0 1px 2px rgba(0,0,0,0.04), 0 2px 8px rgba(0,0,0,0.05);
+  --shadow-md: 0 2px 6px rgba(0,0,0,0.06), 0 14px 36px rgba(0,0,0,0.10);
+  --canvas-bg: #ffffff;
+  --edge: #c7c7cc;
+  --node-fill: rgba(10,132,255,0.10);
+  --node-border: #007aff;
+  --node-text: #1c1c1e;
+  --active-fill: rgba(255,149,0,0.30);
+  --active-border: #ff9500;
+  --conn-fill: rgba(52,199,89,0.20);
+  --conn-border: #34c759;
+  --dim-fill: rgba(120,120,128,0.14);
+  --dim-border: #aeaeb2;
+  --tooltip-bg: rgba(28,28,30,0.88);
+  --tooltip-text: #ffffff;
+  --label-bg: rgba(255,255,255,0.92);
+  --watermark: rgba(0,0,0,0.05);
+  --spring: cubic-bezier(0.32, 0.72, 0, 1);
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #000000;
+    --card-solid: #1c1c1e;
+    --glass-bg: rgba(30,30,32,0.78);
+    --text: #ffffff;
+    --text-2: #8e8e93;
+    --separator: rgba(84,84,88,0.6);
+    --fill: rgba(120,120,128,0.24);
+    --tint: #0a84ff;
+    --shadow-sm: 0 1px 2px rgba(0,0,0,0.4), 0 2px 8px rgba(0,0,0,0.5);
+    --shadow-md: 0 2px 6px rgba(0,0,0,0.5), 0 14px 36px rgba(0,0,0,0.6);
+    --canvas-bg: #0c0c0e;
+    --edge: #48484a;
+    --node-fill: rgba(10,132,255,0.22);
+    --node-border: #0a84ff;
+    --node-text: #ffffff;
+    --active-fill: rgba(255,149,0,0.35);
+    --active-border: #ff9f0a;
+    --conn-fill: rgba(48,209,88,0.22);
+    --conn-border: #30d158;
+    --dim-fill: rgba(120,120,128,0.26);
+    --dim-border: #636366;
+    --tooltip-bg: rgba(44,44,46,0.94);
+    --tooltip-text: #ffffff;
+    --label-bg: rgba(28,28,30,0.88);
+    --watermark: rgba(255,255,255,0.07);
+  }
+}
+* { box-sizing: border-box; }
+html, body { margin:0; padding:0; }
+body { background:var(--bg); color:var(--text); -webkit-font-smoothing:antialiased;
+       -webkit-tap-highlight-color:transparent;
+       font-family:-apple-system,BlinkMacSystemFont,"SF Pro Text","SF Pro Display","Helvetica Neue","PingFang SC","Hiragino Sans GB","Microsoft YaHei","Microsoft YaHei UI",sans-serif;
+       min-height:100vh; display:flex; flex-direction:column; align-items:center;
+       padding:16px;
+       padding:max(16px,env(safe-area-inset-top)) max(16px,env(safe-area-inset-right)) max(28px,env(safe-area-inset-bottom)) max(16px,env(safe-area-inset-left)); }
+#page { width:100%; display:flex; flex-direction:column; align-items:center;
+        animation:pageIn .5s var(--spring) both; }
+@keyframes pageIn { from { opacity:0; transform:translateY(8px); } to { opacity:1; transform:none; } }
+#titleText { font-size:32px; font-size:clamp(26px,4.5vw,34px); font-weight:700;
+             letter-spacing:-0.022em; line-height:1.15; text-align:center; margin:10px 0 0; color:var(--text); }
+#legend { display:flex; gap:22px; justify-content:center; align-items:center;
+          font-size:13px; color:var(--text-2); margin:10px 0 22px; letter-spacing:0.01em; }
+#legend .dot { width:8px; height:8px; border-radius:50%; display:inline-block; margin-right:7px; }
+#canvasCard { position:relative; display:inline-block; max-width:100%; border-radius:24px; overflow:hidden;
+              background:var(--canvas-bg); box-shadow:var(--shadow-md); }
+#canvas { display:block; background:transparent; cursor:grab; touch-action:none; }
+#zoomBtns { position:absolute; right:14px; bottom:14px; display:flex; flex-direction:column; gap:12px; z-index:5; }
+#zoomBtns button { width:46px; height:46px; border-radius:50%; border:0.5px solid var(--separator);
+                   background:var(--glass-bg); -webkit-backdrop-filter:saturate(180%) blur(20px); backdrop-filter:saturate(180%) blur(20px);
+                   color:var(--tint); font-size:22px; line-height:1; display:flex; align-items:center; justify-content:center;
+                   box-shadow:var(--shadow-sm); cursor:pointer; padding:0; touch-action:manipulation;
+                   -webkit-user-select:none; user-select:none;
+                   transition:transform .18s var(--spring), opacity .18s ease, background .18s ease; }
+#zoomBtns button:hover { background:var(--fill); }
+#zoomBtns button:active { transform:scale(0.90); opacity:0.72; }
+#zoomBtns button:focus-visible, #settingsClose:focus-visible, #titleInput:focus-visible { outline:2px solid var(--tint); outline-offset:2px; }
+#settingsPanel { position:fixed; left:0; top:0; right:0; bottom:0; z-index:50; background:rgba(0,0,0,0.4);
+                 display:flex; align-items:flex-end; justify-content:center;
+                 visibility:hidden; opacity:0; pointer-events:none;
+                 transition:opacity .3s ease, visibility .3s ease; }
+#settingsPanel.show { visibility:visible; opacity:1; pointer-events:auto; }
+#settingsBox { width:100%; max-width:520px; background:var(--glass-bg);
+               -webkit-backdrop-filter:saturate(180%) blur(40px); backdrop-filter:saturate(180%) blur(40px);
+               border-radius:24px 24px 0 0; border-top:0.5px solid var(--separator);
+               box-shadow:0 -12px 40px rgba(0,0,0,0.25);
+               padding:8px 24px 28px;
+               padding:8px 24px calc(28px + env(safe-area-inset-bottom));
+               transform:translateY(105%); transition:transform .5s var(--spring); }
+#settingsPanel.show #settingsBox { transform:translateY(0); }
+#grabber { width:36px; height:5px; border-radius:3px; background:var(--fill); margin:8px auto 12px; }
+#settingsTitle { font-size:20px; font-weight:700; text-align:center; letter-spacing:-0.01em; margin:4px 0 6px; color:var(--text); }
+.row { display:flex; align-items:center; justify-content:space-between; min-height:50px; gap:16px; padding:2px;
+       font-size:17px; color:var(--text); cursor:pointer; -webkit-user-select:none; user-select:none; }
+.row + .row { border-top:0.5px solid var(--separator); }
+.switch { position:relative; display:inline-block; width:51px; height:31px; flex:none; }
+.switch input { position:absolute; opacity:0; width:100%; height:100%; margin:0; cursor:pointer; z-index:2; }
+.switch .track { position:absolute; left:0; top:0; right:0; bottom:0; border-radius:16px; background:rgba(120,120,128,0.32); transition:background .25s ease; }
+.switch .thumb { position:absolute; top:2px; left:2px; width:27px; height:27px; border-radius:50%; background:#fff;
+                 box-shadow:0 2px 5px rgba(0,0,0,0.3), 0 0 1px rgba(0,0,0,0.1); transition:transform .3s var(--spring); }
+.switch input:checked + .track { background:var(--income); }
+.switch input:checked + .track + .thumb { transform:translateX(20px); }
+#titleInput { flex:1; max-width:260px; min-width:0; border:none; outline:none; background:var(--fill); color:var(--text);
+              border-radius:10px; padding:8px 12px; font-size:17px; text-align:right; }
+#titleInput:focus { box-shadow:0 0 0 3px rgba(10,132,255,0.28); }
+#settingsClose { width:100%; margin:20px 0 4px; padding:14px; border:none; border-radius:14px; background:var(--tint); color:#fff;
+                 font-size:17px; font-weight:600; cursor:pointer; transition:opacity .18s ease, transform .18s var(--spring); }
+#settingsClose:active { opacity:0.85; transform:scale(0.98); }
+#detailPanel { display:none; margin:24px auto 48px; width:80%; max-width:100%; }
+#detailTitle { font-size:24px; font-weight:700; letter-spacing:-0.02em; text-align:center; margin:0 0 16px; color:var(--text); }
+#detailTable { width:100%; border-collapse:separate; border-spacing:0; background:var(--card-solid);
+               border-radius:18px; overflow:hidden; box-shadow:var(--shadow-sm); font-size:15px; }
+#detailTable th { color:var(--text-2); font-size:13px; font-weight:600; letter-spacing:0.02em; padding:14px 16px 8px; text-align:center; border-bottom:0.5px solid var(--separator); }
+#detailTable td { padding:13px 16px; text-align:center; color:var(--text); border-bottom:0.5px solid var(--separator); }
+#detailTable tbody tr:last-child td { border-bottom:none; }
+#detailTable tbody tr { transition:background .15s ease; }
+#detailTable tbody tr:hover { background:var(--fill); }
+#detailTable td.empty { color:var(--text-2); }
+@media (prefers-reduced-motion: reduce) { * { animation:none !important; transition-duration:0.01ms !important; } }
 </style>
 </head>
 <body>
+<div id="page">
 <h2 id="titleText">''' + safe_title + '''</h2>
-<div id="controls">
-  <span id="legend"><span style="color:#c0392b;">——支出</span>
-  <span style="color:#2e8b57;">——收入</span></span>
+<div id="legend">
+  <span><span class="dot" style="background:#ff3b30;"></span>支出</span>
+  <span><span class="dot" style="background:#34c759;"></span>收入</span>
 </div>
-<div id="canvasWrap">
-<canvas id="canvas"></canvas>
-<div id="settingsPanel">
-  <div id="settingsBox">
-    <div id="settingsTitle">设置</div>
-    <label><input type="checkbox" id="cbAmount"''' + amt_checked + '''> 显示金额</label>
-    <label><input type="checkbox" id="cbMerge"''' + merge_checked + '''> 收入/支出合并显示</label>
-    <label title="开启后点击某个圆圈，只显示该用户及其直接关联的圆圈和连线"><input type="checkbox" id="cbHideOther"''' + hide_checked + '''> 隐藏其他</label>
-    <div id="titleRow">标题：<input type="text" id="titleInput" value="''' + safe_title + '''"></div>
-    <button id="settingsClose" type="button">关闭</button>
-  </div>
-</div>
+<div id="canvasCard">
+<canvas id="canvas" role="img" aria-label="资金流向图，点击圆圈查看其交易详情"></canvas>
 <div id="zoomBtns">
-  <button id="refreshBtn" type="button" title="刷新">↻</button>
-  <button id="settingsBtn" type="button" title="设置">⚙</button>
-  <button id="zoomIn" type="button" title="放大">+</button>
-  <button id="zoomOut" type="button" title="缩小">−</button>
+  <button id="refreshBtn" type="button" title="刷新视图" aria-label="刷新视图">↻</button>
+  <button id="settingsBtn" type="button" title="设置" aria-label="设置">⚙</button>
+  <button id="zoomIn" type="button" title="放大" aria-label="放大">+</button>
+  <button id="zoomOut" type="button" title="缩小" aria-label="缩小">−</button>
 </div>
+</div>
+<div id="settingsPanel" role="dialog" aria-modal="true" aria-label="设置" aria-hidden="true">
+  <div id="settingsBox">
+    <div id="grabber"></div>
+    <div id="settingsTitle">设置</div>
+    <label class="row">
+      <span>显示金额</span>
+      <span class="switch"><input type="checkbox" id="cbAmount"''' + amt_checked + '''><span class="track"></span><span class="thumb"></span></span>
+    </label>
+    <label class="row">
+      <span>收入/支出合并显示</span>
+      <span class="switch"><input type="checkbox" id="cbMerge"''' + merge_checked + '''><span class="track"></span><span class="thumb"></span></span>
+    </label>
+    <label class="row" title="开启后点击某个圆圈，只显示该用户及其直接关联的圆圈和连线">
+      <span>隐藏其他</span>
+      <span class="switch"><input type="checkbox" id="cbHideOther"''' + hide_checked + '''><span class="track"></span><span class="thumb"></span></span>
+    </label>
+    <div class="row">
+      <span>标题</span>
+      <input type="text" id="titleInput" value="''' + safe_title + '''" aria-label="标题">
+    </div>
+    <button id="settingsClose" type="button" aria-label="完成并关闭">完成</button>
+  </div>
 </div>
 <div id="detailPanel">
   <h3 id="detailTitle">用户与其他人员的交易详情</h3>
@@ -411,6 +527,7 @@ body { margin:0; display:flex; flex-direction:column; align-items:center;
     <thead><tr><th>交易类型</th><th>客户方</th><th>金额</th></tr></thead>
     <tbody id="detailBody"></tbody>
   </table>
+</div>
 </div>
 <script>
 var nodes = ''' + nodes_json + ''';
@@ -431,13 +548,55 @@ var W, H;
 var nodeIndex = Object.create(null);
 for (var k = 0; k < nodes.length; k++) { nodeIndex[nodes[k].id] = nodes[k]; }
 
+function cssVar(name, fallback) {
+    var v = '';
+    try { v = getComputedStyle(document.documentElement).getPropertyValue(name); } catch (e) { v = ''; }
+    v = String(v).trim();
+    return (v === '') ? fallback : v;
+}
+function readColors() {
+    return {
+        income: cssVar('--income', '#34c759'),
+        expense: cssVar('--expense', '#ff3b30'),
+        tint: cssVar('--tint', '#007aff'),
+        edge: cssVar('--edge', '#c7c7cc'),
+        nodeFill: cssVar('--node-fill', 'rgba(10,132,255,0.10)'),
+        nodeBorder: cssVar('--node-border', '#007aff'),
+        nodeText: cssVar('--node-text', '#1c1c1e'),
+        activeFill: cssVar('--active-fill', 'rgba(255,149,0,0.30)'),
+        activeBorder: cssVar('--active-border', '#ff9500'),
+        connFill: cssVar('--conn-fill', 'rgba(52,199,89,0.20)'),
+        connBorder: cssVar('--conn-border', '#34c759'),
+        dimFill: cssVar('--dim-fill', 'rgba(120,120,128,0.14)'),
+        dimBorder: cssVar('--dim-border', '#aeaeb2'),
+        tooltipBg: cssVar('--tooltip-bg', 'rgba(28,28,30,0.88)'),
+        tooltipText: cssVar('--tooltip-text', '#ffffff'),
+        labelBg: cssVar('--label-bg', 'rgba(255,255,255,0.92)'),
+        watermark: cssVar('--watermark', 'rgba(0,0,0,0.05)')
+    };
+}
+var C = readColors();
+(function() {
+    if (!window.matchMedia) { return; }
+    var mq = window.matchMedia('(prefers-color-scheme: dark)');
+    var on = function() { C = readColors(); draw(); };
+    if (mq.addEventListener) { mq.addEventListener('change', on); }
+    else if (mq.addListener) { mq.addListener(on); }
+})();
+function tap() { try { if (navigator.vibrate) { navigator.vibrate(8); } } catch (e) {} }
+
 function resizeCanvas() {
-    var w = Math.round((window.innerWidth || 1200) * 0.8);
-    var h = Math.round((window.innerHeight || 800) * 0.8);
-    canvas.width = Math.max(600, w);
-    canvas.height = Math.max(400, h);
+    var vw = window.innerWidth || 1200;
+    var vh = window.innerHeight || 800;
+    var w = (vw < 760) ? Math.max(280, vw - 40) : Math.round(vw * 0.8);
+    var h = (vh < 520) ? Math.max(360, vh - 48) : Math.round(vh * 0.8);
+    canvas.width = Math.max(280, w);
+    canvas.height = Math.max(360, h);
     W = canvas.width; H = canvas.height;
     radiusScale = (Math.min(W, H) - 2 * PADDING) / 700;
+    var dp = document.getElementById('detailPanel');
+    dp.style.width = W + 'px';
+    dp.style.maxWidth = '100%';
     draw();
 }
 resizeCanvas();
@@ -486,22 +645,22 @@ function renderDetail() {
     var html = '';
     for (var j = 0; j < rows.length; j++) {
         var r = rows[j];
-        var color = (r.type === '收入') ? '#2e8b57' : '#c0392b';
+        var color = (r.type === '收入') ? C.income : C.expense;
         html += '<tr><td style="color:' + color + ';">' + esc(r.type) + '</td><td>' + esc(r.other) + '</td><td>' + fmt(r.amount) + '</td></tr>';
     }
     if (rows.length === 0) {
-        html += '<tr><td colspan="3" style="color:#999;">暂无交易记录</td></tr>';
+        html += '<tr><td colspan="3" class="empty">暂无交易记录</td></tr>';
     }
     document.getElementById('detailBody').innerHTML = html;
     panel.style.display = 'block';
 }
 
 function drawWatermark() {
-    ctx.font = '1.5em Microsoft YaHei, SimHei';
-    ctx.fillStyle = '#ddd';
+    ctx.font = '1.4em -apple-system, "Helvetica Neue", "PingFang SC", "Microsoft YaHei", sans-serif';
+    ctx.fillStyle = C.watermark;
     ctx.textAlign = 'left';
     ctx.textBaseline = 'bottom';
-    ctx.fillText('资金流水走向分析工具 Github@drpasserby(WLXC)', 16, H - 12);
+    ctx.fillText('资金流水走向分析工具 Github@drpasserby(WLXC)', 18, H - 14);
 }
 
 function drawArrow(x, y, angle, color, alpha) {
@@ -521,9 +680,9 @@ function drawArrow(x, y, angle, color, alpha) {
 }
 
 function edgeColor(type) {
-    if (type === '支出') { return '#c0392b'; }
-    if (type === '收入') { return '#2e8b57'; }
-    return '#888';
+    if (type === '支出') { return C.expense; }
+    if (type === '收入') { return C.income; }
+    return C.edge;
 }
 
 function drawEdges() {
@@ -579,16 +738,16 @@ function drawEdges() {
 
         if (showAmount) {
             var label = e.type + ' ' + fmt(e.amount);
-            ctx.font = '11px Microsoft YaHei, SimHei';
+            ctx.font = '11px -apple-system, "Helvetica Neue", "PingFang SC", "Microsoft YaHei", sans-serif';
             var tw = ctx.measureText(label).width;
             var lx = (rad !== 0) ? mx : (sx + tx) / 2;
             var ly = (rad !== 0) ? my : (sy + ty) / 2;
             ctx.textAlign = 'center';
             ctx.textBaseline = 'middle';
             ctx.globalAlpha = textAlpha;
-            ctx.fillStyle = '#fff';
-            ctx.fillRect(lx - tw / 2 - 4, ly - 9, tw + 8, 18);
-            ctx.fillStyle = '#333';
+            ctx.fillStyle = C.labelBg;
+            ctx.fillRect(lx - tw / 2 - 5, ly - 10, tw + 10, 20);
+            ctx.fillStyle = lineColor;
             ctx.fillText(label, lx, ly);
             ctx.globalAlpha = 1;
         }
@@ -616,11 +775,11 @@ function drawNodes() {
         if (hideOthers && connected !== null && !connected[n.id]) { continue; }
         var cx = px(n), cy = py(n);
         var r = n.size * scale * radiusScale;
-        var fill = '#dbe9fb', border = '#333', bw = 0.8;
+        var fill = C.nodeFill, border = C.nodeBorder, bw = 1.4;
         if (activeNode !== null) {
-            if (n.id === activeNode) { fill = '#f39c12'; border = '#c0392b'; bw = 3; }
-            else if (connected[n.id]) { fill = '#a9dfbf'; border = '#2e8b57'; bw = 2; }
-            else { fill = '#e5e5e5'; border = '#999'; bw = 0.5; }
+            if (n.id === activeNode) { fill = C.activeFill; border = C.activeBorder; bw = 3; }
+            else if (connected[n.id]) { fill = C.connFill; border = C.connBorder; bw = 2; }
+            else { fill = C.dimFill; border = C.dimBorder; bw = 0.6; }
         }
         ctx.beginPath();
         ctx.arc(cx, cy, r, 0, 2 * Math.PI);
@@ -631,9 +790,9 @@ function drawNodes() {
         ctx.stroke();
     }
     // 第二轮：所有名字最后画，保证不被任何圆圈遮挡，信息完整可读
-    var labelFont = Math.max(9, Math.round(12 * radiusScale)) + 'px Microsoft YaHei, SimHei';
+    var labelFont = Math.max(9, Math.round(12 * radiusScale)) + 'px -apple-system, "Helvetica Neue", "PingFang SC", "Microsoft YaHei", sans-serif';
     ctx.font = labelFont;
-    ctx.fillStyle = '#000';
+    ctx.fillStyle = C.nodeText;
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
     for (var k = 0; k < nodes.length; k++) {
@@ -643,29 +802,43 @@ function drawNodes() {
     }
 }
 
+function roundRect(x, y, w, h, r) {
+    ctx.beginPath();
+    ctx.moveTo(x + r, y);
+    ctx.arcTo(x + w, y, x + w, y + h, r);
+    ctx.arcTo(x + w, y + h, x, y + h, r);
+    ctx.arcTo(x, y + h, x, y, r);
+    ctx.arcTo(x, y, x + w, y, r);
+    ctx.closePath();
+}
+
 function drawTooltip() {
     if (hoverNode === null) { return; }
     var n = nodeIndex[hoverNode];
     if (!n) { return; }
     var t = nodeTotals(hoverNode);
     var lines = [hoverNode, '连接数：' + n.degree, '流入：' + fmt(t.in), '流出：' + fmt(t.out)];
-    ctx.font = '12px Microsoft YaHei, SimHei';
+    ctx.font = '12px -apple-system, "Helvetica Neue", "PingFang SC", "Microsoft YaHei", sans-serif';
     var tw = 0;
     for (var i = 0; i < lines.length; i++) {
         var wl = ctx.measureText(lines[i]).width;
         if (wl > tw) { tw = wl; }
     }
     var bx = 12, by = 12;
-    ctx.fillStyle = 'rgba(255,255,255,0.95)';
-    ctx.strokeStyle = '#bbb';
-    ctx.lineWidth = 1;
-    ctx.fillRect(bx, by, tw + 16, lines.length * 18 + 10);
-    ctx.strokeRect(bx, by, tw + 16, lines.length * 18 + 10);
-    ctx.fillStyle = '#333';
+    var bw2 = tw + 20, bh = lines.length * 19 + 14;
+    ctx.save();
+    ctx.shadowColor = 'rgba(0,0,0,0.28)';
+    ctx.shadowBlur = 12;
+    ctx.shadowOffsetY = 4;
+    ctx.fillStyle = C.tooltipBg;
+    roundRect(bx, by, bw2, bh, 12);
+    ctx.fill();
+    ctx.restore();
+    ctx.fillStyle = C.tooltipText;
     ctx.textAlign = 'left';
     ctx.textBaseline = 'top';
     for (var j = 0; j < lines.length; j++) {
-        ctx.fillText(lines[j], bx + 8, by + 8 + j * 18);
+        ctx.fillText(lines[j], bx + 10, by + 7 + j * 19);
     }
 }
 
@@ -725,6 +898,51 @@ window.addEventListener('mouseup', function() {
     dragging = false; canvas.style.cursor = 'grab';
 });
 
+/* 触屏手势：点选 / 单指平移 / 双指缩放 */
+var touchStartDist = 0;
+canvas.addEventListener('touchstart', function(e) {
+    var t = e.touches;
+    if (t.length === 2) {
+        var dx = t[0].clientX - t[1].clientX, dy = t[0].clientY - t[1].clientY;
+        touchStartDist = Math.sqrt(dx * dx + dy * dy);
+        dragging = false;
+        return;
+    }
+    if (t.length !== 1) { return; }
+    var m = getMousePos(t[0]);
+    var hit = nodeAt(m.x, m.y);
+    if (hit !== null) { activeNode = hit; tap(); draw(); return; }
+    dragging = true; lastX = t[0].clientX; lastY = t[0].clientY;
+    canvas.style.cursor = 'grabbing';
+}, { passive: true });
+
+canvas.addEventListener('touchmove', function(e) {
+    var t = e.touches;
+    if (t.length === 2) {
+        var dx = t[0].clientX - t[1].clientX, dy = t[0].clientY - t[1].clientY;
+        var d = Math.sqrt(dx * dx + dy * dy);
+        if (touchStartDist > 0) {
+            scale = Math.min(8, Math.max(0.2, scale * (d / touchStartDist)));
+            draw();
+        }
+        touchStartDist = d;
+        if (e.cancelable) { e.preventDefault(); }
+        return;
+    }
+    if (!dragging) { return; }
+    var p = t[0];
+    panX += p.clientX - lastX;
+    panY += p.clientY - lastY;
+    lastX = p.clientX; lastY = p.clientY;
+    draw();
+    if (e.cancelable) { e.preventDefault(); }
+}, { passive: false });
+
+canvas.addEventListener('touchend', function() {
+    dragging = false; touchStartDist = 0;
+    canvas.style.cursor = 'grab';
+});
+
 document.getElementById('cbAmount').addEventListener('change', function() {
     showAmount = this.checked; draw();
 });
@@ -745,25 +963,40 @@ document.getElementById('titleInput').addEventListener('input', function() {
     document.title = v;
 });
 document.getElementById('refreshBtn').addEventListener('click', function() {
+    tap();
     activeNode = null;
     scale = 1; panX = 0; panY = 0;
     draw();
 });
 var settingsPanel = document.getElementById('settingsPanel');
+function openSettings() {
+    settingsPanel.className = 'show';
+    settingsPanel.setAttribute('aria-hidden', 'false');
+}
+function closeSettings() {
+    settingsPanel.className = '';
+    settingsPanel.setAttribute('aria-hidden', 'true');
+}
 document.getElementById('settingsBtn').addEventListener('click', function() {
-    settingsPanel.style.display = (settingsPanel.style.display === 'block') ? 'none' : 'block';
+    tap();
+    if (settingsPanel.className === 'show') { closeSettings(); } else { openSettings(); }
 });
 document.getElementById('settingsClose').addEventListener('click', function() {
-    settingsPanel.style.display = 'none';
+    tap(); closeSettings();
 });
 settingsPanel.addEventListener('click', function(e) {
-    if (e.target === settingsPanel) { settingsPanel.style.display = 'none'; }
+    if (e.target === settingsPanel) { closeSettings(); }
+});
+window.addEventListener('keydown', function(e) {
+    if (e.key === 'Escape' && settingsPanel.className === 'show') { closeSettings(); }
 });
 document.getElementById('zoomIn').addEventListener('click', function() {
+    tap();
     scale = Math.min(8, scale * 1.25);
     draw();
 });
 document.getElementById('zoomOut').addEventListener('click', function() {
+    tap();
     scale = Math.max(0.2, scale / 1.25);
     draw();
 });
