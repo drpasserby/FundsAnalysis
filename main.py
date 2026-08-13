@@ -1,6 +1,6 @@
 """
 资金流水走向分析工具
-版本：1.1.8
+版本：1.1.9
 作者：wulvxinchen
 """
 
@@ -322,13 +322,12 @@ contract = build_contract(G_sep, G_mer)
 # ================= HTML 输出（自包含交互式查看器） =================
 def generate_html(contract, title='资金流水分析演示图', show_amount=True, merge_edges=False, hide_other=True):
     """生成自包含的交互式 HTML：数据内嵌、离线可用（JS 保持 ES5 兼容旧浏览器）。
-    用户界面遵循 Apple iOS 设计语言：系统字体、毛玻璃、圆角卡片、深浅色自适应、
-    弹簧动画、层级阴影、安全区适配与无障碍标签。
-    三个开关（显示金额 / 合并收支 / 隐藏其他）与标题输入收纳在设置面板中，
-    通过画布右下角齿轮按钮打开（底部弹窗形式）；右下角另提供刷新按钮恢复初始视图，
-    放大/缩小按钮控制内部图形缩放；支持点击高亮、悬浮提示、滚轮缩放、拖拽平移及触屏手势。
-    点击某用户后，画布下方以表格展示其与其他人员的交易详情（交易类型/客户方/金额），
-    不点击则不显示任何信息。
+    内置两套界面风格，可在设置面板切换：
+      · 经典（原 1.1.7 风格）——顶栏图例、方形按钮、居中设置弹窗、朴素表格；
+      · iOS（Apple iOS 设计语言）——系统字体、毛玻璃、圆角卡片、深浅色自适应、
+        弹簧动画、安全区适配、底部弹窗设置、iOS 开关；iOS 风格下箭头收于圆圈下方不遮挡名字。
+    其余交互：点击高亮、悬浮提示、滚轮缩放、拖拽平移、触屏手势、刷新视图；
+    点击某用户后画布下方以表格展示其交易详情（交易类型/客户方/金额），不点击不显示。
     """
     nodes_json = json.dumps(contract['nodes'], ensure_ascii=False).replace('</', '<\\/')
     edges_sep_json = json.dumps(contract['edgesSep'], ensure_ascii=False).replace('</', '<\\/')
@@ -346,150 +345,165 @@ def generate_html(contract, title='资金流水分析演示图', show_amount=Tru
 <html lang="zh-CN">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>资金流向图</title>
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>''' + safe_title + '''</title>
 <style>
 :root {
   color-scheme: light dark;
-  --bg: #f2f2f7;
-  --card-solid: #ffffff;
-  --glass-bg: rgba(255,255,255,0.78);
-  --text: #1c1c1e;
-  --text-2: #8e8e93;
-  --separator: rgba(60,60,67,0.29);
-  --fill: rgba(120,120,128,0.12);
-  --tint: #007aff;
-  --income: #34c759;
-  --expense: #ff3b30;
-  --shadow-sm: 0 1px 2px rgba(0,0,0,0.04), 0 2px 8px rgba(0,0,0,0.05);
-  --shadow-md: 0 2px 6px rgba(0,0,0,0.06), 0 14px 36px rgba(0,0,0,0.10);
-  --canvas-bg: #ffffff;
-  --edge: #c7c7cc;
-  --node-fill: rgba(10,132,255,0.10);
-  --node-border: #007aff;
-  --node-text: #1c1c1e;
-  --active-fill: rgba(255,149,0,0.30);
-  --active-border: #ff9500;
-  --conn-fill: rgba(52,199,89,0.20);
-  --conn-border: #34c759;
-  --dim-fill: rgba(120,120,128,0.14);
-  --dim-border: #aeaeb2;
-  --tooltip-bg: rgba(28,28,30,0.88);
-  --tooltip-text: #ffffff;
-  --label-bg: rgba(255,255,255,0.92);
-  --watermark: rgba(0,0,0,0.05);
-  --spring: cubic-bezier(0.32, 0.72, 0, 1);
+  --bg:#f2f2f7; --card-solid:#ffffff; --glass-bg:rgba(255,255,255,0.78);
+  --text:#1c1c1e; --text-2:#8e8e93; --separator:rgba(60,60,67,0.29); --fill:rgba(120,120,128,0.12);
+  --tint:#007aff; --income:#34c759; --expense:#ff3b30;
+  --shadow-sm:0 1px 2px rgba(0,0,0,0.04), 0 2px 8px rgba(0,0,0,0.05);
+  --shadow-md:0 2px 6px rgba(0,0,0,0.06), 0 14px 36px rgba(0,0,0,0.10);
+  --canvas-bg:#ffffff; --edge:#c7c7cc;
+  --node-fill:rgba(10,132,255,0.10); --node-border:#007aff; --node-text:#1c1c1e;
+  --active-fill:rgba(255,149,0,0.30); --active-border:#ff9500;
+  --conn-fill:rgba(52,199,89,0.20); --conn-border:#34c759;
+  --dim-fill:rgba(120,120,128,0.14); --dim-border:#aeaeb2;
+  --tooltip-bg:rgba(28,28,30,0.88); --tooltip-text:#ffffff;
+  --label-bg:rgba(255,255,255,0.92); --watermark:rgba(0,0,0,0.05);
+  --spring:cubic-bezier(0.32,0.72,0,1);
 }
 @media (prefers-color-scheme: dark) {
-  :root {
-    --bg: #000000;
-    --card-solid: #1c1c1e;
-    --glass-bg: rgba(30,30,32,0.78);
-    --text: #ffffff;
-    --text-2: #8e8e93;
-    --separator: rgba(84,84,88,0.6);
-    --fill: rgba(120,120,128,0.24);
-    --tint: #0a84ff;
-    --shadow-sm: 0 1px 2px rgba(0,0,0,0.4), 0 2px 8px rgba(0,0,0,0.5);
-    --shadow-md: 0 2px 6px rgba(0,0,0,0.5), 0 14px 36px rgba(0,0,0,0.6);
-    --canvas-bg: #0c0c0e;
-    --edge: #48484a;
-    --node-fill: rgba(10,132,255,0.22);
-    --node-border: #0a84ff;
-    --node-text: #ffffff;
-    --active-fill: rgba(255,149,0,0.35);
-    --active-border: #ff9f0a;
-    --conn-fill: rgba(48,209,88,0.22);
-    --conn-border: #30d158;
-    --dim-fill: rgba(120,120,128,0.26);
-    --dim-border: #636366;
-    --tooltip-bg: rgba(44,44,46,0.94);
-    --tooltip-text: #ffffff;
-    --label-bg: rgba(28,28,30,0.88);
-    --watermark: rgba(255,255,255,0.07);
+  :root { --bg:#000000; --card-solid:#1c1c1e; --glass-bg:rgba(30,30,32,0.78); --text:#ffffff; --text-2:#8e8e93;
+    --separator:rgba(84,84,88,0.6); --fill:rgba(120,120,128,0.24); --tint:#0a84ff;
+    --shadow-sm:0 1px 2px rgba(0,0,0,0.4), 0 2px 8px rgba(0,0,0,0.5);
+    --shadow-md:0 2px 6px rgba(0,0,0,0.5), 0 14px 36px rgba(0,0,0,0.6);
+    --canvas-bg:#0c0c0e; --edge:#48484a;
+    --node-fill:rgba(10,132,255,0.22); --node-border:#0a84ff; --node-text:#ffffff;
+    --active-fill:rgba(255,149,0,0.35); --active-border:#ff9f0a;
+    --conn-fill:rgba(48,209,88,0.22); --conn-border:#30d158;
+    --dim-fill:rgba(120,120,128,0.26); --dim-border:#636366;
+    --tooltip-bg:rgba(44,44,46,0.94); --tooltip-text:#ffffff; --label-bg:rgba(28,28,30,0.88); --watermark:rgba(255,255,255,0.07);
   }
 }
-* { box-sizing: border-box; }
+/* ================= 经典界面（默认样式，对应 1.1.7） ================= */
 html, body { margin:0; padding:0; }
-body { background:var(--bg); color:var(--text); -webkit-font-smoothing:antialiased;
-       -webkit-tap-highlight-color:transparent;
-       font-family:-apple-system,BlinkMacSystemFont,"SF Pro Text","SF Pro Display","Helvetica Neue","PingFang SC","Hiragino Sans GB","Microsoft YaHei","Microsoft YaHei UI",sans-serif;
-       min-height:100vh; display:flex; flex-direction:column; align-items:center;
-       padding:16px;
-       padding:max(16px,env(safe-area-inset-top)) max(16px,env(safe-area-inset-right)) max(28px,env(safe-area-inset-bottom)) max(16px,env(safe-area-inset-left)); }
-#page { width:100%; display:flex; flex-direction:column; align-items:center;
-        animation:pageIn .5s var(--spring) both; }
+body { display:flex; flex-direction:column; align-items:center;
+       font-family:'Microsoft YaHei','SimHei',sans-serif; background:#fafafa; }
+#page { width:100%; display:flex; flex-direction:column; align-items:center; }
+#titleText { margin:8px 0 2px; font-size:20px; color:#333; }
+#legendClassic { font-size:13px; color:#555; margin:12px 0 8px; }
+#legendIos { display:none; }
+#canvasWrap { position:relative; }
+#canvas { border:1px solid #ccc; background:#fff; cursor:grab; }
+#zoomBtns { position:absolute; right:10px; bottom:10px; display:flex; flex-direction:column; gap:6px; }
+#zoomBtns button { width:36px; height:36px; font-size:24px; line-height:1; cursor:pointer;
+                   border:1px solid #bbb; border-radius:4px; background:#fff; color:#333;
+                   -webkit-user-select:none; user-select:none; padding:0; }
+#zoomBtns button:hover { background:#f0f0f0; }
+#zoomBtns button:active { background:#e0e0e0; }
+#settingsPanel { display:none; position:absolute; top:0; left:0; right:0; bottom:0;
+                 background:rgba(0,0,0,0.25); z-index:10; }
+#settingsPanel.show { display:block; }
+#settingsBox { position:absolute; top:50%; left:50%; transform:translate(-50%,-50%);
+               background:#fff; border:1px solid #ccc; border-radius:6px; padding:16px 20px;
+               font-size:14px; color:#333; box-shadow:0 4px 16px rgba(0,0,0,0.2); }
+#grabber { display:none; }
+#settingsTitle { font-size:16px; font-weight:bold; margin-bottom:8px; }
+#settingsBox .row { display:block; margin:8px 0; cursor:pointer; }
+#settingsBox #titleRow { margin:8px 0; cursor:default; }
+#titleRow .rowLabel::after { content:'：'; }
+#settingsBox .switch { display:inline-block; vertical-align:middle; }
+#settingsBox .switch input { position:static; opacity:1; width:auto; height:auto; margin:0; }
+#settingsBox .switch .track, #settingsBox .switch .thumb { display:none; }
+#settingsClose { margin-top:12px; padding:4px 16px; cursor:pointer; }
+.t-ios { display:none; }
+.t-classic { display:inline; }
+.seg { display:inline-flex; vertical-align:middle; }
+.seg-btn { border:1px solid #bbb; background:#fff; color:#333; padding:2px 12px; cursor:pointer; font-size:13px; }
+.seg-btn.active { background:#007aff; color:#fff; border-color:#007aff; }
+#detailPanel { display:none; margin:16px auto 40px; width:80%; max-width:1000px;
+               min-width:400px; font-size:14px; color:#333; }
+#detailTitle { text-align:center; font-size:17px; margin:0 0 10px; }
+#detailTable { border-collapse:collapse; width:100%; background:#fff; }
+#detailTable th, #detailTable td { border:1px solid #dcdcdc; padding:7px 14px; text-align:center; }
+#detailTable th { background:#f0f4f8; color:#333; font-weight:bold; }
+#detailTable tbody tr:nth-child(even) { background:#fafafa; }
+#detailTable tbody tr:hover { background:#f0f7ff; }
+#detailTable td.empty { color:#999; }
+/* ================= iOS 界面覆盖（body.mode-ios） ================= */
+body.mode-ios { background:var(--bg); color:var(--text); -webkit-font-smoothing:antialiased;
+  -webkit-tap-highlight-color:transparent;
+  font-family:-apple-system,BlinkMacSystemFont,"SF Pro Text","SF Pro Display","Helvetica Neue","PingFang SC","Hiragino Sans GB","Microsoft YaHei","Microsoft YaHei UI",sans-serif;
+  min-height:100vh; padding:16px;
+  padding:max(16px,env(safe-area-inset-top)) max(16px,env(safe-area-inset-right)) max(28px,env(safe-area-inset-bottom)) max(16px,env(safe-area-inset-left)); }
+body.mode-ios #page { animation:pageIn .5s var(--spring) both; }
 @keyframes pageIn { from { opacity:0; transform:translateY(8px); } to { opacity:1; transform:none; } }
-#titleText { font-size:32px; font-size:clamp(26px,4.5vw,34px); font-weight:700;
-             letter-spacing:-0.022em; line-height:1.15; text-align:center; margin:10px 0 0; color:var(--text); }
-#legend { display:flex; gap:22px; justify-content:center; align-items:center;
-          font-size:13px; color:var(--text-2); margin:10px 0 22px; letter-spacing:0.01em; }
-#legend .dot { width:8px; height:8px; border-radius:50%; display:inline-block; margin-right:7px; }
-#canvasCard { position:relative; display:inline-block; max-width:100%; border-radius:24px; overflow:hidden;
-              background:var(--canvas-bg); box-shadow:var(--shadow-md); }
-#canvas { display:block; background:transparent; cursor:grab; touch-action:none; }
-#zoomBtns { position:absolute; right:14px; bottom:14px; display:flex; flex-direction:column; gap:12px; z-index:5; }
-#zoomBtns button { width:46px; height:46px; border-radius:50%; border:0.5px solid var(--separator);
-                   background:var(--glass-bg); -webkit-backdrop-filter:saturate(180%) blur(20px); backdrop-filter:saturate(180%) blur(20px);
-                   color:var(--tint); font-size:22px; line-height:1; display:flex; align-items:center; justify-content:center;
-                   box-shadow:var(--shadow-sm); cursor:pointer; padding:0; touch-action:manipulation;
-                   -webkit-user-select:none; user-select:none;
-                   transition:transform .18s var(--spring), opacity .18s ease, background .18s ease; }
-#zoomBtns button:hover { background:var(--fill); }
-#zoomBtns button:active { transform:scale(0.90); opacity:0.72; }
-#zoomBtns button:focus-visible, #settingsClose:focus-visible, #titleInput:focus-visible { outline:2px solid var(--tint); outline-offset:2px; }
-#settingsPanel { position:fixed; left:0; top:0; right:0; bottom:0; z-index:50; background:rgba(0,0,0,0.4);
-                 display:flex; align-items:flex-end; justify-content:center;
-                 visibility:hidden; opacity:0; pointer-events:none;
-                 transition:opacity .3s ease, visibility .3s ease; }
-#settingsPanel.show { visibility:visible; opacity:1; pointer-events:auto; }
-#settingsBox { width:100%; max-width:520px; background:var(--glass-bg);
-               -webkit-backdrop-filter:saturate(180%) blur(40px); backdrop-filter:saturate(180%) blur(40px);
-               border-radius:24px 24px 0 0; border-top:0.5px solid var(--separator);
-               box-shadow:0 -12px 40px rgba(0,0,0,0.25);
-               padding:8px 24px 28px;
-               padding:8px 24px calc(28px + env(safe-area-inset-bottom));
-               transform:translateY(105%); transition:transform .5s var(--spring); }
-#settingsPanel.show #settingsBox { transform:translateY(0); }
-#grabber { width:36px; height:5px; border-radius:3px; background:var(--fill); margin:8px auto 12px; }
-#settingsTitle { font-size:20px; font-weight:700; text-align:center; letter-spacing:-0.01em; margin:4px 0 6px; color:var(--text); }
-.row { display:flex; align-items:center; justify-content:space-between; min-height:50px; gap:16px; padding:2px;
-       font-size:17px; color:var(--text); cursor:pointer; -webkit-user-select:none; user-select:none; }
-.row + .row { border-top:0.5px solid var(--separator); }
-.switch { position:relative; display:inline-block; width:51px; height:31px; flex:none; }
-.switch input { position:absolute; opacity:0; width:100%; height:100%; margin:0; cursor:pointer; z-index:2; }
-.switch .track { position:absolute; left:0; top:0; right:0; bottom:0; border-radius:16px; background:rgba(120,120,128,0.32); transition:background .25s ease; }
-.switch .thumb { position:absolute; top:2px; left:2px; width:27px; height:27px; border-radius:50%; background:#fff;
-                 box-shadow:0 2px 5px rgba(0,0,0,0.3), 0 0 1px rgba(0,0,0,0.1); transition:transform .3s var(--spring); }
-.switch input:checked + .track { background:var(--income); }
-.switch input:checked + .track + .thumb { transform:translateX(20px); }
-#titleInput { flex:1; max-width:260px; min-width:0; border:none; outline:none; background:var(--fill); color:var(--text);
-              border-radius:10px; padding:8px 12px; font-size:17px; text-align:right; }
-#titleInput:focus { box-shadow:0 0 0 3px rgba(10,132,255,0.28); }
-#settingsClose { width:100%; margin:20px 0 4px; padding:14px; border:none; border-radius:14px; background:var(--tint); color:#fff;
-                 font-size:17px; font-weight:600; cursor:pointer; transition:opacity .18s ease, transform .18s var(--spring); }
-#settingsClose:active { opacity:0.85; transform:scale(0.98); }
-#detailPanel { display:none; margin:24px auto 48px; width:80%; max-width:100%; }
-#detailTitle { font-size:24px; font-weight:700; letter-spacing:-0.02em; text-align:center; margin:0 0 16px; color:var(--text); }
-#detailTable { width:100%; border-collapse:separate; border-spacing:0; background:var(--card-solid);
-               border-radius:18px; overflow:hidden; box-shadow:var(--shadow-sm); font-size:15px; }
-#detailTable th { color:var(--text-2); font-size:13px; font-weight:600; letter-spacing:0.02em; padding:14px 16px 8px; text-align:center; border-bottom:0.5px solid var(--separator); }
-#detailTable td { padding:13px 16px; text-align:center; color:var(--text); border-bottom:0.5px solid var(--separator); }
-#detailTable tbody tr:last-child td { border-bottom:none; }
-#detailTable tbody tr { transition:background .15s ease; }
-#detailTable tbody tr:hover { background:var(--fill); }
-#detailTable td.empty { color:var(--text-2); }
+body.mode-ios #titleText { font-size:32px; font-size:clamp(26px,4.5vw,34px); font-weight:700;
+  letter-spacing:-0.022em; line-height:1.15; margin:10px 0 0; color:var(--text); }
+body.mode-ios #legendClassic { display:none; }
+body.mode-ios #legendIos { display:flex; gap:22px; justify-content:center; align-items:center;
+  font-size:13px; color:var(--text-2); margin:10px 0 22px; letter-spacing:0.01em; }
+#legendIos .dot { width:8px; height:8px; border-radius:50%; display:inline-block; margin-right:7px; }
+body.mode-ios #canvasWrap { display:inline-block; max-width:100%; border-radius:24px; overflow:hidden;
+  background:var(--canvas-bg); box-shadow:var(--shadow-md); }
+body.mode-ios #canvas { border:none; display:block; background:transparent; touch-action:none; }
+body.mode-ios #zoomBtns { right:14px; bottom:14px; gap:12px; }
+body.mode-ios #zoomBtns button { width:46px; height:46px; border-radius:50%; border:0.5px solid var(--separator);
+  background:var(--glass-bg); -webkit-backdrop-filter:saturate(180%) blur(20px); backdrop-filter:saturate(180%) blur(20px);
+  color:var(--tint); font-size:22px; box-shadow:var(--shadow-sm); touch-action:manipulation;
+  transition:transform .18s var(--spring), opacity .18s ease, background .18s ease; }
+body.mode-ios #zoomBtns button:hover { background:var(--fill); }
+body.mode-ios #zoomBtns button:active { transform:scale(0.90); opacity:0.72; }
+body.mode-ios #zoomBtns button:focus-visible, body.mode-ios #settingsClose:focus-visible, body.mode-ios #titleInput:focus-visible { outline:2px solid var(--tint); outline-offset:2px; }
+body.mode-ios #settingsPanel { display:flex; position:fixed; left:0; top:0; right:0; bottom:0; z-index:50; background:rgba(0,0,0,0.4);
+  align-items:flex-end; justify-content:center; visibility:hidden; opacity:0; pointer-events:none;
+  transition:opacity .3s ease, visibility .3s ease; }
+body.mode-ios #settingsPanel.show { visibility:visible; opacity:1; pointer-events:auto; }
+body.mode-ios #settingsBox { position:static; width:100%; max-width:520px; background:var(--glass-bg);
+  -webkit-backdrop-filter:saturate(180%) blur(40px); backdrop-filter:saturate(180%) blur(40px);
+  border-radius:24px 24px 0 0; border:0; border-top:0.5px solid var(--separator);
+  box-shadow:0 -12px 40px rgba(0,0,0,0.25); color:var(--text); font-size:17px;
+  padding:8px 24px 28px; padding:8px 24px calc(28px + env(safe-area-inset-bottom));
+  transform:translateY(105%); transition:transform .5s var(--spring); }
+body.mode-ios #settingsPanel.show #settingsBox { transform:translateY(0); }
+body.mode-ios #grabber { display:block; width:36px; height:5px; border-radius:3px; background:var(--fill); margin:8px auto 12px; }
+body.mode-ios #settingsTitle { font-size:20px; font-weight:700; text-align:center; letter-spacing:-0.01em; margin:4px 0 6px; color:var(--text); }
+body.mode-ios #settingsBox .row { display:flex; align-items:center; justify-content:space-between; min-height:50px; gap:16px; padding:2px; margin:0; font-size:17px; color:var(--text); }
+body.mode-ios #settingsBox .row + .row { border-top:0.5px solid var(--separator); }
+body.mode-ios #settingsBox .row .rowLabel { order:-1; -webkit-user-select:none; user-select:none; }
+body.mode-ios #titleRow .rowLabel::after { content:none; }
+body.mode-ios #settingsBox .switch { position:relative; display:inline-block; width:51px; height:31px; flex:none; }
+body.mode-ios #settingsBox .switch input { position:absolute; opacity:0; width:100%; height:100%; margin:0; cursor:pointer; z-index:2; }
+body.mode-ios #settingsBox .switch .track { display:block; position:absolute; left:0; top:0; right:0; bottom:0; border-radius:16px; background:rgba(120,120,128,0.32); transition:background .25s ease; }
+body.mode-ios #settingsBox .switch .thumb { display:block; position:absolute; top:2px; left:2px; width:27px; height:27px; border-radius:50%; background:#fff;
+  box-shadow:0 2px 5px rgba(0,0,0,0.3), 0 0 1px rgba(0,0,0,0.1); transition:transform .3s var(--spring); }
+body.mode-ios #settingsBox .switch input:checked + .track { background:var(--income); }
+body.mode-ios #settingsBox .switch input:checked + .track + .thumb { transform:translateX(20px); }
+body.mode-ios #titleInput { flex:1; max-width:260px; min-width:0; border:none; outline:none; background:var(--fill); color:var(--text);
+  border-radius:10px; padding:8px 12px; font-size:17px; text-align:right; }
+body.mode-ios #titleInput:focus { box-shadow:0 0 0 3px rgba(10,132,255,0.28); }
+body.mode-ios #settingsClose { width:100%; margin:20px 0 4px; padding:14px; border:none; border-radius:14px; background:var(--tint); color:#fff;
+  font-size:17px; font-weight:600; transition:opacity .18s ease, transform .18s var(--spring); }
+body.mode-ios #settingsClose:active { opacity:0.85; transform:scale(0.98); }
+body.mode-ios .t-classic { display:none; }
+body.mode-ios .t-ios { display:inline; }
+body.mode-ios .seg { background:var(--fill); border-radius:9px; padding:2px; display:inline-flex; }
+body.mode-ios .seg-btn { border:none; background:transparent; color:var(--text-2); padding:5px 18px; font-size:13px; font-weight:500; border-radius:7px; }
+body.mode-ios .seg-btn.active { background:var(--card-solid); color:var(--text); box-shadow:var(--shadow-sm); }
+body.mode-ios #detailPanel { margin:24px auto 48px; width:80%; max-width:100%; font-size:15px; color:var(--text); }
+body.mode-ios #detailTitle { font-size:24px; font-weight:700; letter-spacing:-0.02em; margin:0 0 16px; color:var(--text); }
+body.mode-ios #detailTable { border-collapse:separate; border-spacing:0; background:var(--card-solid);
+  border-radius:18px; overflow:hidden; box-shadow:var(--shadow-sm); }
+body.mode-ios #detailTable th, body.mode-ios #detailTable td { border:0; border-bottom:0.5px solid var(--separator); }
+body.mode-ios #detailTable th { background:transparent; color:var(--text-2); font-size:13px; font-weight:600; letter-spacing:0.02em; padding:14px 16px 8px; }
+body.mode-ios #detailTable td { padding:13px 16px; color:var(--text); }
+body.mode-ios #detailTable tbody tr:last-child td { border-bottom:none; }
+body.mode-ios #detailTable tbody tr:nth-child(even) { background:transparent; }
+body.mode-ios #detailTable td.empty { color:var(--text-2); }
 @media (prefers-reduced-motion: reduce) { * { animation:none !important; transition-duration:0.01ms !important; } }
 </style>
 </head>
-<body>
+<body class="mode-ios">
 <div id="page">
 <h2 id="titleText">''' + safe_title + '''</h2>
-<div id="legend">
+<div id="legendClassic"><span style="color:#c0392b;">——支出</span> <span style="color:#2e8b57;">——收入</span></div>
+<div id="legendIos">
   <span><span class="dot" style="background:#ff3b30;"></span>支出</span>
   <span><span class="dot" style="background:#34c759;"></span>收入</span>
 </div>
-<div id="canvasCard">
+<div id="canvasWrap">
 <canvas id="canvas" role="img" aria-label="资金流向图，点击圆圈查看其交易详情"></canvas>
 <div id="zoomBtns">
   <button id="refreshBtn" type="button" title="刷新视图" aria-label="刷新视图">↻</button>
@@ -497,29 +511,24 @@ body { background:var(--bg); color:var(--text); -webkit-font-smoothing:antialias
   <button id="zoomIn" type="button" title="放大" aria-label="放大">+</button>
   <button id="zoomOut" type="button" title="缩小" aria-label="缩小">−</button>
 </div>
-</div>
 <div id="settingsPanel" role="dialog" aria-modal="true" aria-label="设置" aria-hidden="true">
   <div id="settingsBox">
     <div id="grabber"></div>
     <div id="settingsTitle">设置</div>
-    <label class="row">
-      <span>显示金额</span>
-      <span class="switch"><input type="checkbox" id="cbAmount"''' + amt_checked + '''><span class="track"></span><span class="thumb"></span></span>
-    </label>
-    <label class="row">
-      <span>收入/支出合并显示</span>
-      <span class="switch"><input type="checkbox" id="cbMerge"''' + merge_checked + '''><span class="track"></span><span class="thumb"></span></span>
-    </label>
-    <label class="row" title="开启后点击某个圆圈，只显示该用户及其直接关联的圆圈和连线">
-      <span>隐藏其他</span>
-      <span class="switch"><input type="checkbox" id="cbHideOther"''' + hide_checked + '''><span class="track"></span><span class="thumb"></span></span>
-    </label>
-    <div class="row">
-      <span>标题</span>
-      <input type="text" id="titleInput" value="''' + safe_title + '''" aria-label="标题">
+    <div class="row" id="uiStyleRow" role="radiogroup" aria-label="界面风格">
+      <span class="rowLabel">界面风格</span>
+      <span class="seg">
+        <button type="button" class="seg-btn" data-mode="classic" aria-label="经典">经典</button>
+        <button type="button" class="seg-btn active" data-mode="ios" aria-label="iOS">iOS</button>
+      </span>
     </div>
-    <button id="settingsClose" type="button" aria-label="完成并关闭">完成</button>
+    <label class="row"><span class="switch"><input type="checkbox" id="cbAmount"''' + amt_checked + '''><span class="track"></span><span class="thumb"></span></span><span class="rowLabel">显示金额</span></label>
+    <label class="row"><span class="switch"><input type="checkbox" id="cbMerge"''' + merge_checked + '''><span class="track"></span><span class="thumb"></span></span><span class="rowLabel">收入/支出合并显示</span></label>
+    <label class="row" title="开启后点击某个圆圈，只显示该用户及其直接关联的圆圈和连线"><span class="switch"><input type="checkbox" id="cbHideOther"''' + hide_checked + '''><span class="track"></span><span class="thumb"></span></span><span class="rowLabel">隐藏其他</span></label>
+    <div class="row" id="titleRow"><span class="rowLabel">标题</span><input type="text" id="titleInput" value="''' + safe_title + '''" aria-label="标题"></div>
+    <button id="settingsClose" type="button" aria-label="完成并关闭"><span class="t-classic">关闭</span><span class="t-ios">完成</span></button>
   </div>
+</div>
 </div>
 <div id="detailPanel">
   <h3 id="detailTitle">用户与其他人员的交易详情</h3>
@@ -544,10 +553,12 @@ var currentEdges = mergeEdges ? edgesMer : edgesSep;
 var canvas = document.getElementById('canvas');
 var ctx = canvas.getContext('2d');
 var W, H;
+var mode = 'ios';  // 'ios' | 'classic'
 
 var nodeIndex = Object.create(null);
 for (var k = 0; k < nodes.length; k++) { nodeIndex[nodes[k].id] = nodes[k]; }
 
+/* 从 CSS 读取 iOS 主题色；经典模式使用固定色板 CLASSIC */
 function cssVar(name, fallback) {
     var v = '';
     try { v = getComputedStyle(document.documentElement).getPropertyValue(name); } catch (e) { v = ''; }
@@ -572,17 +583,44 @@ function readColors() {
         tooltipBg: cssVar('--tooltip-bg', 'rgba(28,28,30,0.88)'),
         tooltipText: cssVar('--tooltip-text', '#ffffff'),
         labelBg: cssVar('--label-bg', 'rgba(255,255,255,0.92)'),
-        watermark: cssVar('--watermark', 'rgba(0,0,0,0.05)')
+        watermark: cssVar('--watermark', 'rgba(0,0,0,0.05)'),
+        canvasBg: cssVar('--canvas-bg', '#ffffff'),
+        bwNormal: 1.4, bwActive: 3, bwConn: 2, bwDim: 0.6
     };
 }
-var C = readColors();
+var CLASSIC = {
+    income: '#2e8b57', expense: '#c0392b', edge: '#888',
+    nodeFill: '#dbe9fb', nodeBorder: '#333', nodeText: '#000',
+    activeFill: '#f39c12', activeBorder: '#c0392b',
+    connFill: '#a9dfbf', connBorder: '#2e8b57',
+    dimFill: '#e5e5e5', dimBorder: '#999',
+    tooltipBg: 'rgba(255,255,255,0.95)', tooltipText: '#333',
+    labelBg: '#fff', watermark: '#ddd', canvasBg: '#fff',
+    bwNormal: 0.8, bwActive: 3, bwConn: 2, bwDim: 0.5
+};
+var C = CLASSIC;
+
+function applyMode(newMode) {
+    mode = newMode;
+    document.body.className = (mode === 'ios') ? 'mode-ios' : 'mode-classic';
+    C = (mode === 'ios') ? readColors() : CLASSIC;
+    var segs = document.querySelectorAll('.seg-btn');
+    for (var i = 0; i < segs.length; i++) {
+        segs[i].className = (segs[i].getAttribute('data-mode') === mode) ? 'seg-btn active' : 'seg-btn';
+    }
+    var dp = document.getElementById('detailPanel');
+    if (mode === 'ios' && W) { dp.style.width = W + 'px'; dp.style.maxWidth = '100%'; }
+    else { dp.style.width = ''; dp.style.maxWidth = ''; }
+    draw();
+}
 (function() {
     if (!window.matchMedia) { return; }
     var mq = window.matchMedia('(prefers-color-scheme: dark)');
-    var on = function() { C = readColors(); draw(); };
+    var on = function() { if (mode === 'ios') { C = readColors(); draw(); } };
     if (mq.addEventListener) { mq.addEventListener('change', on); }
     else if (mq.addListener) { mq.addListener(on); }
 })();
+/* 轻触反馈模拟（支持 vibrate 的浏览器/设备） */
 function tap() { try { if (navigator.vibrate) { navigator.vibrate(8); } } catch (e) {} }
 
 function resizeCanvas() {
@@ -595,10 +633,10 @@ function resizeCanvas() {
     W = canvas.width; H = canvas.height;
     radiusScale = (Math.min(W, H) - 2 * PADDING) / 700;
     var dp = document.getElementById('detailPanel');
-    dp.style.width = W + 'px';
-    dp.style.maxWidth = '100%';
+    if (mode === 'ios') { dp.style.width = W + 'px'; dp.style.maxWidth = '100%'; }
     draw();
 }
+C = readColors();
 resizeCanvas();
 
 function px(n) { return (PADDING + n.x * (W - 2 * PADDING)) * scale + panX; }
@@ -629,6 +667,16 @@ function esc(s) {
     return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
 
+function roundRect(x, y, w, h, r) {
+    ctx.beginPath();
+    ctx.moveTo(x + r, y);
+    ctx.arcTo(x + w, y, x + w, y + h, r);
+    ctx.arcTo(x + w, y + h, x, y + h, r);
+    ctx.arcTo(x, y + h, x, y, r);
+    ctx.arcTo(x, y, x + w, y, r);
+    ctx.closePath();
+}
+
 function renderDetail() {
     var panel = document.getElementById('detailPanel');
     if (activeNode === null) { panel.style.display = 'none'; return; }
@@ -656,11 +704,16 @@ function renderDetail() {
 }
 
 function drawWatermark() {
-    ctx.font = '1.4em -apple-system, "Helvetica Neue", "PingFang SC", "Microsoft YaHei", sans-serif';
+    if (mode === 'ios') {
+        ctx.font = '1.4em -apple-system, "Helvetica Neue", "PingFang SC", "Microsoft YaHei", sans-serif';
+    } else {
+        ctx.font = '1.5em Microsoft YaHei, SimHei';
+    }
     ctx.fillStyle = C.watermark;
     ctx.textAlign = 'left';
     ctx.textBaseline = 'bottom';
-    ctx.fillText('资金流水走向分析工具 Github@drpasserby(WLXC)', 18, H - 14);
+    if (mode === 'ios') { ctx.fillText('资金流水走向分析工具 Github@drpasserby(WLXC)', 18, H - 14); }
+    else { ctx.fillText('资金流水走向分析工具 Github@drpasserby(WLXC)', 16, H - 12); }
 }
 
 function drawArrow(x, y, angle, color, alpha) {
@@ -717,37 +770,47 @@ function drawEdges() {
         if (rad !== 0) { ctx.quadraticCurveTo(mx, my, tx, ty); }
         else { ctx.lineTo(tx, ty); }
         ctx.strokeStyle = lineColor;
-        ctx.lineWidth = 1.5;
+        ctx.lineWidth = 1.6;
         ctx.globalAlpha = alpha;
         ctx.stroke();
         ctx.globalAlpha = 1;
 
+        // 箭头尖端：iOS 风格收在目标圆圈边缘（绘制于圆圈下方，不遮挡名字）；经典保持原 12px
+        var stopDist = (mode === 'ios') ? (tn.size * scale * radiusScale) : 12;
         var ax2, ay2, aAng;
         if (rad !== 0) {
             var tgx = tx - mx, tgy = ty - my;
             var tl = Math.sqrt(tgx * tgx + tgy * tgy) || 1;
-            ax2 = tx - tgx / tl * 12;
-            ay2 = ty - tgy / tl * 12;
+            ax2 = tx - tgx / tl * stopDist;
+            ay2 = ty - tgy / tl * stopDist;
             aAng = Math.atan2(tgy, tgx);
         } else {
-            ax2 = tx - dx / len * 12;
-            ay2 = ty - dy / len * 12;
+            ax2 = tx - dx / len * stopDist;
+            ay2 = ty - dy / len * stopDist;
             aAng = Math.atan2(dy, dx);
         }
         drawArrow(ax2, ay2, aAng, lineColor, (activeNode === null) ? 0.9 : alpha);
 
         if (showAmount) {
             var label = e.type + ' ' + fmt(e.amount);
-            ctx.font = '11px -apple-system, "Helvetica Neue", "PingFang SC", "Microsoft YaHei", sans-serif';
+            ctx.font = (mode === 'ios')
+                ? '11px -apple-system, "Helvetica Neue", "PingFang SC", "Microsoft YaHei", sans-serif'
+                : '11px Microsoft YaHei, SimHei';
             var tw = ctx.measureText(label).width;
             var lx = (rad !== 0) ? mx : (sx + tx) / 2;
             var ly = (rad !== 0) ? my : (sy + ty) / 2;
             ctx.textAlign = 'center';
             ctx.textBaseline = 'middle';
             ctx.globalAlpha = textAlpha;
-            ctx.fillStyle = C.labelBg;
-            ctx.fillRect(lx - tw / 2 - 5, ly - 10, tw + 10, 20);
-            ctx.fillStyle = lineColor;
+            if (mode === 'ios') {
+                ctx.fillStyle = C.labelBg;
+                ctx.fillRect(lx - tw / 2 - 5, ly - 10, tw + 10, 20);
+                ctx.fillStyle = lineColor;
+            } else {
+                ctx.fillStyle = '#fff';
+                ctx.fillRect(lx - tw / 2 - 4, ly - 9, tw + 8, 18);
+                ctx.fillStyle = '#333';
+            }
             ctx.fillText(label, lx, ly);
             ctx.globalAlpha = 1;
         }
@@ -775,14 +838,17 @@ function drawNodes() {
         if (hideOthers && connected !== null && !connected[n.id]) { continue; }
         var cx = px(n), cy = py(n);
         var r = n.size * scale * radiusScale;
-        var fill = C.nodeFill, border = C.nodeBorder, bw = 1.4;
+        var fill = C.nodeFill, border = C.nodeBorder, bw = C.bwNormal;
         if (activeNode !== null) {
-            if (n.id === activeNode) { fill = C.activeFill; border = C.activeBorder; bw = 3; }
-            else if (connected[n.id]) { fill = C.connFill; border = C.connBorder; bw = 2; }
-            else { fill = C.dimFill; border = C.dimBorder; bw = 0.6; }
+            if (n.id === activeNode) { fill = C.activeFill; border = C.activeBorder; bw = C.bwActive; }
+            else if (connected[n.id]) { fill = C.connFill; border = C.connBorder; bw = C.bwConn; }
+            else { fill = C.dimFill; border = C.dimBorder; bw = C.bwDim; }
         }
         ctx.beginPath();
         ctx.arc(cx, cy, r, 0, 2 * Math.PI);
+        // 先垫一层不透明底色，保证连线永远在圆圈下方（半透明填充时也看不穿）
+        ctx.fillStyle = C.canvasBg;
+        ctx.fill();
         ctx.fillStyle = fill;
         ctx.fill();
         ctx.strokeStyle = border;
@@ -790,7 +856,8 @@ function drawNodes() {
         ctx.stroke();
     }
     // 第二轮：所有名字最后画，保证不被任何圆圈遮挡，信息完整可读
-    var labelFont = Math.max(9, Math.round(12 * radiusScale)) + 'px -apple-system, "Helvetica Neue", "PingFang SC", "Microsoft YaHei", sans-serif';
+    var labelFont = Math.max(9, Math.round(12 * radiusScale)) + 'px ' +
+        ((mode === 'ios') ? '-apple-system,"Helvetica Neue","PingFang SC","Microsoft YaHei",sans-serif' : 'Microsoft YaHei, SimHei');
     ctx.font = labelFont;
     ctx.fillStyle = C.nodeText;
     ctx.textAlign = 'center';
@@ -802,43 +869,55 @@ function drawNodes() {
     }
 }
 
-function roundRect(x, y, w, h, r) {
-    ctx.beginPath();
-    ctx.moveTo(x + r, y);
-    ctx.arcTo(x + w, y, x + w, y + h, r);
-    ctx.arcTo(x + w, y + h, x, y + h, r);
-    ctx.arcTo(x, y + h, x, y, r);
-    ctx.arcTo(x, y, x + w, y, r);
-    ctx.closePath();
-}
-
 function drawTooltip() {
     if (hoverNode === null) { return; }
     var n = nodeIndex[hoverNode];
     if (!n) { return; }
     var t = nodeTotals(hoverNode);
     var lines = [hoverNode, '连接数：' + n.degree, '流入：' + fmt(t.in), '流出：' + fmt(t.out)];
-    ctx.font = '12px -apple-system, "Helvetica Neue", "PingFang SC", "Microsoft YaHei", sans-serif';
-    var tw = 0;
-    for (var i = 0; i < lines.length; i++) {
-        var wl = ctx.measureText(lines[i]).width;
-        if (wl > tw) { tw = wl; }
+    if (mode === 'classic') {
+        ctx.font = '12px Microsoft YaHei, SimHei';
+        var tw = 0;
+        for (var i = 0; i < lines.length; i++) {
+            var wl = ctx.measureText(lines[i]).width;
+            if (wl > tw) { tw = wl; }
+        }
+        var bx = 12, by = 12;
+        ctx.fillStyle = 'rgba(255,255,255,0.95)';
+        ctx.strokeStyle = '#bbb';
+        ctx.lineWidth = 1;
+        ctx.fillRect(bx, by, tw + 16, lines.length * 18 + 10);
+        ctx.strokeRect(bx, by, tw + 16, lines.length * 18 + 10);
+        ctx.fillStyle = '#333';
+        ctx.textAlign = 'left';
+        ctx.textBaseline = 'top';
+        for (var j = 0; j < lines.length; j++) {
+            ctx.fillText(lines[j], bx + 8, by + 8 + j * 18);
+        }
+        return;
     }
-    var bx = 12, by = 12;
-    var bw2 = tw + 20, bh = lines.length * 19 + 14;
+    // iOS 风格：深色圆角悬浮卡 + 柔和阴影
+    ctx.font = '12px -apple-system, "Helvetica Neue", "PingFang SC", "Microsoft YaHei", sans-serif';
+    var tw2 = 0;
+    for (var m = 0; m < lines.length; m++) {
+        var wm = ctx.measureText(lines[m]).width;
+        if (wm > tw2) { tw2 = wm; }
+    }
+    var bx2 = 12, by2 = 12;
+    var bw2 = tw2 + 20, bh = lines.length * 19 + 14;
     ctx.save();
     ctx.shadowColor = 'rgba(0,0,0,0.28)';
     ctx.shadowBlur = 12;
     ctx.shadowOffsetY = 4;
     ctx.fillStyle = C.tooltipBg;
-    roundRect(bx, by, bw2, bh, 12);
+    roundRect(bx2, by2, bw2, bh, 12);
     ctx.fill();
     ctx.restore();
     ctx.fillStyle = C.tooltipText;
     ctx.textAlign = 'left';
     ctx.textBaseline = 'top';
-    for (var j = 0; j < lines.length; j++) {
-        ctx.fillText(lines[j], bx + 10, by + 7 + j * 19);
+    for (var p = 0; p < lines.length; p++) {
+        ctx.fillText(lines[p], bx2 + 10, by2 + 7 + p * 19);
     }
 }
 
@@ -962,12 +1041,6 @@ document.getElementById('titleInput').addEventListener('input', function() {
     titleText.textContent = v;
     document.title = v;
 });
-document.getElementById('refreshBtn').addEventListener('click', function() {
-    tap();
-    activeNode = null;
-    scale = 1; panX = 0; panY = 0;
-    draw();
-});
 var settingsPanel = document.getElementById('settingsPanel');
 function openSettings() {
     settingsPanel.className = 'show';
@@ -989,6 +1062,21 @@ settingsPanel.addEventListener('click', function(e) {
 });
 window.addEventListener('keydown', function(e) {
     if (e.key === 'Escape' && settingsPanel.className === 'show') { closeSettings(); }
+});
+var segBtns = document.querySelectorAll('.seg-btn');
+for (var q = 0; q < segBtns.length; q++) {
+    (function(btn) {
+        btn.addEventListener('click', function() {
+            tap();
+            applyMode(btn.getAttribute('data-mode'));
+        });
+    })(segBtns[q]);
+}
+document.getElementById('refreshBtn').addEventListener('click', function() {
+    tap();
+    activeNode = null;
+    scale = 1; panX = 0; panY = 0;
+    draw();
 });
 document.getElementById('zoomIn').addEventListener('click', function() {
     tap();
