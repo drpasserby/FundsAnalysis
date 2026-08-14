@@ -1,6 +1,6 @@
 """
 资金流水走向分析工具
-版本：1.1.9
+版本：1.2.0
 作者：wulvxinchen
 """
 
@@ -110,14 +110,18 @@ if data_messages:
 if df.empty:
     sys.exit('没有可用的有效数据，程序退出。')
 
-# ================= 图构建（统一，一次遍历产出两套图） =================
+# ================= 图构建（一次遍历，按节点对聚合“不重复”的双向流水） =================
 def build_graphs(df):
-    """一次遍历构建两套有向图：
-    G_sep —— 收入/支出不合并：支出边 a→c，收入边 c→a；
-    G_mer —— 同一对节点合并存储收支，双向分别画边。
+    """一次遍历，按无序节点对聚合“不重复”的双向流水。
+    对每一对 (a, b)：
+      a→b 流向 = max(a支出b总额, b收入a总额)  —— “a支出b”与“b收入a”是同一笔资金，只算一次；
+      b→a 流向 = max(b支出a总额, a收入b总额)  —— 同理。
+    同一对的两笔真实往来分别保留，不做 X-Y 相减。
+    返回无向图 G，每对节点一条边，属性 out=a→b 不重复总额、inn=b→a 不重复总额
+    （(a, b) 为规范序：a 为字典序较小端，每对只出现一次）。
     """
-    edge_sep = defaultdict(lambda: {'weight': 0.0, 'type': None})
-    edge_mer = defaultdict(lambda: {'to_weight': 0.0, 'from_weight': 0.0})
+    spend = defaultdict(float)  # spend[(付款方, 收款方)] = 付款方记的“支出”总额
+    recv = defaultdict(float)   # recv[(付款方, 收款方)] = 收款方记的“收入”总额（钱从付款方流向收款方）
 
     for _, row in df.iterrows():
         a = str(row.iloc[0]).strip()
@@ -129,45 +133,36 @@ def build_graphs(df):
             continue
 
         if '支出' in direction:
-            edge_sep[(a, c)]['weight'] += amount
-            edge_sep[(a, c)]['type'] = '支出'
-            edge_mer[(a, c)]['to_weight'] += amount
+            spend[(a, c)] += amount
         elif '收入' in direction:
-            edge_sep[(c, a)]['weight'] += amount
-            edge_sep[(c, a)]['type'] = '收入'
-            edge_mer[(a, c)]['from_weight'] += amount
+            # “a 收入 c”表示钱从 c 流向 a
+            recv[(c, a)] += amount
 
-    G_sep = nx.DiGraph()
-    for (u, v), info in edge_sep.items():
-        G_sep.add_edge(u, v, weight=info['weight'], etype=info['type'])
-
-    G_mer = nx.DiGraph()
-    for (u, v), info in edge_mer.items():
-        if info['to_weight'] > 0:
-            G_mer.add_edge(u, v, weight=info['to_weight'], etype='支出')
-        if info['from_weight'] > 0:
-            G_mer.add_edge(v, u, weight=info['from_weight'], etype='收入')
-
-    return G_sep, G_mer
+    G = nx.Graph()
+    pairs = {}
+    for (a, b) in set(spend) | set(recv):
+        pairs[(min(a, b), max(a, b))] = True  # 每对只保留一个规范方向，避免双向流水互相覆盖
+    for (a, b) in sorted(pairs):
+        ab = max(spend.get((a, b), 0.0), recv.get((a, b), 0.0))  # a→b 不重复总额
+        ba = max(spend.get((b, a), 0.0), recv.get((b, a), 0.0))  # b→a 不重复总额
+        G.add_edge(a, b, out=ab, inn=ba)
+    return G
 
 
-G_sep, G_mer = build_graphs(df)
+G = build_graphs(df)
 
 # ================= 数据契约（供 HTML 渲染使用） =================
-def build_contract(G_sep, G_mer):
+def build_contract(G):
     """生成 HTML 端使用的数据契约：坐标归一化到 [0,1]，节点大小设上限。
     布局后做重叠消除，配合 HTML 端的半径缩放，任意窗口尺寸下圆圈互不遮挡。
-    返回 {'nodes': [...], 'edgesSep': [...], 'edgesMer': [...]}
+    返回 {'nodes': [...], 'edges': [...]}；每条边 amount=source→target 不重复总额，
+    back=target→source 不重复总额。
     """
-    all_nodes = sorted(set(G_sep.nodes()) | set(G_mer.nodes()))
+    all_nodes = sorted(G.nodes())
 
-    pos = nx.spring_layout(G_sep, k=4, seed=42) if len(G_sep.nodes()) > 0 else {}
+    pos = nx.spring_layout(G, k=4, seed=42) if len(G.nodes()) > 0 else {}
 
-    degree_dict = {}
-    for node in all_nodes:
-        pred = set(G_sep.predecessors(node)) if node in G_sep else set()
-        succ = set(G_sep.successors(node)) if node in G_sep else set()
-        degree_dict[node] = len(pred | succ)
+    degree_dict = {n: G.degree(n) for n in all_nodes}
 
     # 节点大小：基础值 + 度 * 缩放，设上限防止枢纽节点过大
     base_size = 500
@@ -294,33 +289,36 @@ def build_contract(G_sep, G_mer):
         nodes_json.append({'id': node, 'x': x, 'y': y, 'size': display_s[node], 'degree': degree_dict[node]})
 
     def edge_list(G):
+        """每对节点一条边：amount=source→target 不重复总额，back=target→source 不重复总额。
+        build_graphs 以规范方向 (min,max) 写入 out=flow(min→max)、inn=flow(max→min)，
+        这里统一让 source 为较小端，保证方向语义稳定（G.edges() 迭代顺序与 add_edge 无关）。
+        """
         edges = []
         for u, v in G.edges():
             info = G[u][v]
-            rad = 0.0
-            if G.has_edge(v, u):
-                rad = 0.25 if u < v else -0.25
+            if u < v:
+                source, target = u, v
+            else:
+                source, target = v, u
             edges.append({
-                'source': u,
-                'target': v,
-                'type': info.get('etype', ''),
-                'amount': info['weight'],
-                'rad': rad
+                'source': source,
+                'target': target,
+                'amount': info['out'],
+                'back': info['inn'],
             })
         return edges
 
     return {
         'nodes': nodes_json,
-        'edgesSep': edge_list(G_sep),
-        'edgesMer': edge_list(G_mer),
+        'edges': edge_list(G),
     }
 
 
-contract = build_contract(G_sep, G_mer)
+contract = build_contract(G)
 
 
 # ================= HTML 输出（自包含交互式查看器） =================
-def generate_html(contract, title='资金流水分析演示图', show_amount=True, merge_edges=False, hide_other=True):
+def generate_html(contract, title='资金流水分析演示图', show_amount=True, hide_other=True):
     """生成自包含的交互式 HTML：数据内嵌、离线可用（JS 保持 ES5 兼容旧浏览器）。
     内置两套界面风格，可在设置面板切换：
       · 经典（原 1.1.7 风格）——顶栏图例、方形按钮、居中设置弹窗、朴素表格；
@@ -330,15 +328,12 @@ def generate_html(contract, title='资金流水分析演示图', show_amount=Tru
     点击某用户后画布下方以表格展示其交易详情（交易类型/客户方/金额），不点击不显示。
     """
     nodes_json = json.dumps(contract['nodes'], ensure_ascii=False).replace('</', '<\\/')
-    edges_sep_json = json.dumps(contract['edgesSep'], ensure_ascii=False).replace('</', '<\\/')
-    edges_mer_json = json.dumps(contract['edgesMer'], ensure_ascii=False).replace('</', '<\\/')
+    edges_json = json.dumps(contract['edges'], ensure_ascii=False).replace('</', '<\\/')
     safe_title = (title.replace('&', '&amp;').replace('<', '&lt;')
                        .replace('>', '&gt;').replace('"', '&quot;'))
     amt_checked = ' checked' if show_amount else ''
-    merge_checked = ' checked' if merge_edges else ''
     hide_checked = ' checked' if hide_other else ''
     show_js = 'true' if show_amount else 'false'
-    merge_js = 'true' if merge_edges else 'false'
     hide_js = 'true' if hide_other else 'false'
 
     return '''<!DOCTYPE html>
@@ -498,10 +493,10 @@ body.mode-ios #detailTable td.empty { color:var(--text-2); }
 <body class="mode-ios">
 <div id="page">
 <h2 id="titleText">''' + safe_title + '''</h2>
-<div id="legendClassic"><span style="color:#c0392b;">——支出</span> <span style="color:#2e8b57;">——收入</span></div>
+<div id="legendClassic"><span style="color:#c0392b;">——净流入</span> <span style="color:#2e8b57;">——净流出</span></div>
 <div id="legendIos">
-  <span><span class="dot" style="background:#ff3b30;"></span>支出</span>
-  <span><span class="dot" style="background:#34c759;"></span>收入</span>
+  <span><span class="dot" style="background:#ff3b30;"></span>净流入</span>
+  <span><span class="dot" style="background:#34c759;"></span>净流出</span>
 </div>
 <div id="canvasWrap">
 <canvas id="canvas" role="img" aria-label="资金流向图，点击圆圈查看其交易详情"></canvas>
@@ -523,7 +518,6 @@ body.mode-ios #detailTable td.empty { color:var(--text-2); }
       </span>
     </div>
     <label class="row"><span class="switch"><input type="checkbox" id="cbAmount"''' + amt_checked + '''><span class="track"></span><span class="thumb"></span></span><span class="rowLabel">显示金额</span></label>
-    <label class="row"><span class="switch"><input type="checkbox" id="cbMerge"''' + merge_checked + '''><span class="track"></span><span class="thumb"></span></span><span class="rowLabel">收入/支出合并显示</span></label>
     <label class="row" title="开启后点击某个圆圈，只显示该用户及其直接关联的圆圈和连线"><span class="switch"><input type="checkbox" id="cbHideOther"''' + hide_checked + '''><span class="track"></span><span class="thumb"></span></span><span class="rowLabel">隐藏其他</span></label>
     <div class="row" id="titleRow"><span class="rowLabel">标题</span><input type="text" id="titleInput" value="''' + safe_title + '''" aria-label="标题"></div>
     <button id="settingsClose" type="button" aria-label="完成并关闭"><span class="t-classic">关闭</span><span class="t-ios">完成</span></button>
@@ -540,16 +534,15 @@ body.mode-ios #detailTable td.empty { color:var(--text-2); }
 </div>
 <script>
 var nodes = ''' + nodes_json + ''';
-var edgesSep = ''' + edges_sep_json + ''';
-var edgesMer = ''' + edges_mer_json + ''';
+var edges = ''' + edges_json + ''';
 var PADDING = 80;
 var radiusScale = 1;  // 节点半径随画布最小边缩放，防止不同窗口尺寸下圆圈互相遮挡
 var scale = 1, panX = 0, panY = 0;
 var activeNode = null, hoverNode = null;
 var showAmount = ''' + show_js + ''';
-var mergeEdges = ''' + merge_js + ''';
 var hideOthers = ''' + hide_js + ''';
-var currentEdges = mergeEdges ? edgesMer : edgesSep;
+/* 单边视图：每对用户一条线（source→target 为 amount，反向为 back），默认黑色 */
+/* 点击某用户后，连线按该用户视角的净流向着色：净流出=绿色，净流入=红色 */
 var canvas = document.getElementById('canvas');
 var ctx = canvas.getContext('2d');
 var W, H;
@@ -646,10 +639,10 @@ function fmt(n) { return Math.round(n).toLocaleString(); }
 
 function nodeTotals(id) {
     var tin = 0, tout = 0;
-    for (var i = 0; i < currentEdges.length; i++) {
-        var e = currentEdges[i];
-        if (e.target === id) { tin += e.amount; }
-        if (e.source === id) { tout += e.amount; }
+    for (var i = 0; i < edges.length; i++) {
+        var e = edges[i];
+        if (e.source === id) { tout += e.amount; tin += e.back; }
+        else if (e.target === id) { tout += e.back; tin += e.amount; }
     }
     return { in: tin, out: tout };
 }
@@ -681,11 +674,14 @@ function renderDetail() {
     var panel = document.getElementById('detailPanel');
     if (activeNode === null) { panel.style.display = 'none'; return; }
     var rows = [];
-    for (var i = 0; i < currentEdges.length; i++) {
-        var e = currentEdges[i];
-        if (e.source === activeNode || e.target === activeNode) {
-            var other = (e.source === activeNode) ? e.target : e.source;
-            rows.push({ type: e.type || '', other: other, amount: e.amount });
+    for (var i = 0; i < edges.length; i++) {
+        var e = edges[i];
+        if (e.source === activeNode) {
+            rows.push({ type: '支出', other: e.target, amount: e.amount });
+            rows.push({ type: '收入', other: e.target, amount: e.back });
+        } else if (e.target === activeNode) {
+            rows.push({ type: '支出', other: e.source, amount: e.back });
+            rows.push({ type: '收入', other: e.source, amount: e.amount });
         }
     }
     rows.sort(function(a, b) { return b.amount - a.amount; });
@@ -732,17 +728,11 @@ function drawArrow(x, y, angle, color, alpha) {
     ctx.restore();
 }
 
-function edgeColor(type) {
-    if (type === '支出') { return C.expense; }
-    if (type === '收入') { return C.income; }
-    return C.edge;
-}
-
 function drawEdges() {
     var connected = null;
     if (activeNode !== null) { connected = Object.create(null); connected[activeNode] = true; }
-    for (var i = 0; i < currentEdges.length; i++) {
-        var e = currentEdges[i];
+    for (var i = 0; i < edges.length; i++) {
+        var e = edges[i];
         if (hideOthers && activeNode !== null && e.source !== activeNode && e.target !== activeNode) { continue; }
         var sn = nodeIndex[e.source];
         var tn = nodeIndex[e.target];
@@ -752,53 +742,80 @@ function drawEdges() {
         var dx = tx - sx, dy = ty - sy;
         var len = Math.sqrt(dx * dx + dy * dy);
         if (len === 0) { continue; }
-        var nvx = -dy / len, nvy = dx / len;
-        var rad = e.rad || 0;
-        var off = rad * len;
-        var mx = (sx + tx) / 2 + off * nvx;
-        var my = (sy + ty) / 2 + off * nvy;
 
-        var alpha = 0.7, lineColor = edgeColor(e.type), textAlpha = 1.0;
+        // 是否以活动节点为端点：是则可按活动节点视角计算净流向
+        var isActiveEnd = (activeNode !== null) && (e.source === activeNode || e.target === activeNode);
+        var isSrc = (e.source === activeNode);   // 活动节点在边的 source 端
+        var out, in_;
+        if (isActiveEnd) {
+            out = isSrc ? e.amount : e.back;     // 活动节点流向对方
+            in_ = isSrc ? e.back : e.amount;     // 对方流向活动节点
+        }
+
+        // 颜色：默认黑色（iOS 用主题中性色保证深浅色下可见）；
+        // 点击后按活动节点视角——净流出=绿色、净流入=红色、相等仍为中性
+        var lineColor = (mode === 'classic') ? '#000000' : C.edge;
+        if (isActiveEnd) {
+            if (out > in_) { lineColor = C.income; }
+            else if (in_ > out) { lineColor = C.expense; }
+        }
+
+        var alpha = 0.7, textAlpha = 1.0;
         if (activeNode !== null) {
-            if (e.source === activeNode || e.target === activeNode) { alpha = 1.0; }
+            if (isActiveEnd) { alpha = 1.0; }
             else if (connected[e.source] && connected[e.target]) { alpha = 0.9; }
             else { alpha = 0.15; textAlpha = 0.3; }
         }
 
         ctx.beginPath();
         ctx.moveTo(sx, sy);
-        if (rad !== 0) { ctx.quadraticCurveTo(mx, my, tx, ty); }
-        else { ctx.lineTo(tx, ty); }
+        ctx.lineTo(tx, ty);
         ctx.strokeStyle = lineColor;
         ctx.lineWidth = 1.6;
         ctx.globalAlpha = alpha;
         ctx.stroke();
         ctx.globalAlpha = 1;
 
-        // 箭头尖端：iOS 风格收在目标圆圈边缘（绘制于圆圈下方，不遮挡名字）；经典保持原 12px
-        var stopDist = (mode === 'ios') ? (tn.size * scale * radiusScale) : 12;
-        var ax2, ay2, aAng;
-        if (rad !== 0) {
-            var tgx = tx - mx, tgy = ty - my;
-            var tl = Math.sqrt(tgx * tgx + tgy * tgy) || 1;
-            ax2 = tx - tgx / tl * stopDist;
-            ay2 = ty - tgy / tl * stopDist;
-            aAng = Math.atan2(tgy, tgx);
-        } else {
-            ax2 = tx - dx / len * stopDist;
-            ay2 = ty - dy / len * stopDist;
-            aAng = Math.atan2(dy, dx);
+        // 箭头：仅当活动节点为端点且存在净流向。净流出箭头指向对方，净流入箭头指向活动节点。
+        // 尖端收在对应圆圈边缘（绘制于圆圈下方，不遮挡名字）。
+        if (isActiveEnd && out !== in_) {
+            var aX = isSrc ? sx : tx;   // 活动节点位置
+            var aY = isSrc ? sy : ty;
+            var oX = isSrc ? tx : sx;   // 对方位置
+            var oY = isSrc ? ty : sy;
+            var odx = oX - aX, ody = oY - aY;
+            var oLen = Math.sqrt(odx * odx + ody * ody) || 1;
+            var rAct = (isSrc ? sn : tn).size * scale * radiusScale;
+            var rOth = (isSrc ? tn : sn).size * scale * radiusScale;
+            var ax2, ay2, aAng;
+            if (out > in_) {
+                // 净流出：活动节点→对方，箭头尖端收在对方圆边
+                ax2 = oX - odx / oLen * rOth;
+                ay2 = oY - ody / oLen * rOth;
+                aAng = Math.atan2(ody, odx);
+            } else {
+                // 净流入：对方→活动节点，箭头尖端收在活动节点圆边
+                ax2 = aX + odx / oLen * rAct;
+                ay2 = aY + ody / oLen * rAct;
+                aAng = Math.atan2(-ody, -odx);
+            }
+            drawArrow(ax2, ay2, aAng, lineColor, 1.0);
         }
-        drawArrow(ax2, ay2, aAng, lineColor, (activeNode === null) ? 0.9 : alpha);
 
         if (showAmount) {
-            var label = e.type + ' ' + fmt(e.amount);
+            var label;
+            if (isActiveEnd) {
+                // 从活动节点视角显示“不重复”的支出与收入
+                label = '支出 ' + fmt(out) + '  收入 ' + fmt(in_);
+            } else {
+                label = e.source + '→' + e.target + ':' + fmt(e.amount) + '  ' + e.target + '→' + e.source + ':' + fmt(e.back);
+            }
             ctx.font = (mode === 'ios')
                 ? '11px -apple-system, "Helvetica Neue", "PingFang SC", "Microsoft YaHei", sans-serif'
                 : '11px Microsoft YaHei, SimHei';
             var tw = ctx.measureText(label).width;
-            var lx = (rad !== 0) ? mx : (sx + tx) / 2;
-            var ly = (rad !== 0) ? my : (sy + ty) / 2;
+            var lx = (sx + tx) / 2;
+            var ly = (sy + ty) / 2;
             ctx.textAlign = 'center';
             ctx.textBaseline = 'middle';
             ctx.globalAlpha = textAlpha;
@@ -820,8 +837,8 @@ function drawEdges() {
 function buildConnected() {
     var conn = Object.create(null);
     if (activeNode === null) { return conn; }
-    for (var i = 0; i < currentEdges.length; i++) {
-        var e = currentEdges[i];
+    for (var i = 0; i < edges.length; i++) {
+        var e = edges[i];
         if (e.source === activeNode) { conn[e.target] = true; }
         if (e.target === activeNode) { conn[e.source] = true; }
     }
@@ -1024,12 +1041,6 @@ canvas.addEventListener('touchend', function() {
 
 document.getElementById('cbAmount').addEventListener('change', function() {
     showAmount = this.checked; draw();
-});
-document.getElementById('cbMerge').addEventListener('change', function() {
-    mergeEdges = this.checked;
-    currentEdges = mergeEdges ? edgesMer : edgesSep;
-    activeNode = null;
-    draw();
 });
 document.getElementById('cbHideOther').addEventListener('change', function() {
     hideOthers = this.checked;
