@@ -1,6 +1,6 @@
 """
 资金流水走向分析工具
-版本：1.2.0
+版本：1.2.1
 作者：wulvxinchen
 """
 
@@ -413,7 +413,9 @@ body { display:flex; flex-direction:column; align-items:center;
 #detailTitle { text-align:center; font-size:17px; margin:0 0 10px; }
 #detailTable { border-collapse:collapse; width:100%; background:#fff; }
 #detailTable th, #detailTable td { border:1px solid #dcdcdc; padding:7px 14px; text-align:center; }
-#detailTable th { background:#f0f4f8; color:#333; font-weight:bold; }
+#detailTable th { background:#f0f4f8; color:#333; font-weight:bold; cursor:pointer; -webkit-user-select:none; user-select:none; }
+#detailTable th .sortArrow { font-size:11px; margin-left:4px; color:#888; }
+#detailTable th:hover { background:#e6edf4; }
 #detailTable tbody tr:nth-child(even) { background:#fafafa; }
 #detailTable tbody tr:hover { background:#f0f7ff; }
 #detailTable td.empty { color:#999; }
@@ -482,7 +484,9 @@ body.mode-ios #detailTitle { font-size:24px; font-weight:700; letter-spacing:-0.
 body.mode-ios #detailTable { border-collapse:separate; border-spacing:0; background:var(--card-solid);
   border-radius:18px; overflow:hidden; box-shadow:var(--shadow-sm); }
 body.mode-ios #detailTable th, body.mode-ios #detailTable td { border:0; border-bottom:0.5px solid var(--separator); }
-body.mode-ios #detailTable th { background:transparent; color:var(--text-2); font-size:13px; font-weight:600; letter-spacing:0.02em; padding:14px 16px 8px; }
+body.mode-ios #detailTable th { background:transparent; color:var(--text-2); font-size:13px; font-weight:600; letter-spacing:0.02em; padding:14px 16px 8px; cursor:pointer; -webkit-user-select:none; user-select:none; }
+body.mode-ios #detailTable th:hover { background:var(--fill); }
+body.mode-ios #detailTable th .sortArrow { color:var(--text-2); }
 body.mode-ios #detailTable td { padding:13px 16px; color:var(--text); }
 body.mode-ios #detailTable tbody tr:last-child td { border-bottom:none; }
 body.mode-ios #detailTable tbody tr:nth-child(even) { background:transparent; }
@@ -527,7 +531,11 @@ body.mode-ios #detailTable td.empty { color:var(--text-2); }
 <div id="detailPanel">
   <h3 id="detailTitle">用户与其他人员的交易详情</h3>
   <table id="detailTable">
-    <thead><tr><th>交易类型</th><th>客户方</th><th>金额</th></tr></thead>
+    <thead><tr>
+      <th id="thType" role="button" tabindex="0" aria-sort="none">交易类型 <span class="sortArrow" id="arrowType"></span></th>
+      <th id="thOther" role="button" tabindex="0" aria-sort="none">客户方 <span class="sortArrow" id="arrowOther"></span></th>
+      <th id="thAmount" role="button" tabindex="0" aria-sort="none">金额 <span class="sortArrow" id="arrowAmount"></span></th>
+    </tr></thead>
     <tbody id="detailBody"></tbody>
   </table>
 </div>
@@ -539,6 +547,7 @@ var PADDING = 80;
 var radiusScale = 1;  // 节点半径随画布最小边缩放，防止不同窗口尺寸下圆圈互相遮挡
 var scale = 1, panX = 0, panY = 0;
 var activeNode = null, hoverNode = null;
+var sortKey = 'amount', sortDir = -1;  // 交易详情表排序状态：默认按金额降序
 var showAmount = ''' + show_js + ''';
 var hideOthers = ''' + hide_js + ''';
 /* 单边视图：每对用户一条线（source→target 为 amount，反向为 back），默认黑色 */
@@ -672,6 +681,24 @@ function roundRect(x, y, w, h, r) {
 
 function renderDetail() {
     var panel = document.getElementById('detailPanel');
+    // 更新表头排序指示箭头（▲升序 / ▼降序）
+    var arrowEls = {
+        type: document.getElementById('arrowType'),
+        other: document.getElementById('arrowOther'),
+        amount: document.getElementById('arrowAmount')
+    };
+    var sortKeys = ['type', 'other', 'amount'];
+    for (var si = 0; si < sortKeys.length; si++) {
+        var k = sortKeys[si];
+        var aEl = arrowEls[k];
+        if (!aEl) { continue; }
+        aEl.textContent = (k === sortKey) ? ((sortDir === 1) ? '▲' : '▼') : '';
+        var thEl = aEl.parentNode;
+        if (thEl) {
+            thEl.setAttribute('aria-sort',
+                (k === sortKey) ? ((sortDir === 1) ? 'ascending' : 'descending') : 'none');
+        }
+    }
     if (activeNode === null) { panel.style.display = 'none'; return; }
     var rows = [];
     for (var i = 0; i < edges.length; i++) {
@@ -684,7 +711,13 @@ function renderDetail() {
             rows.push({ type: '收入', other: e.source, amount: e.amount });
         }
     }
-    rows.sort(function(a, b) { return b.amount - a.amount; });
+    rows.sort(function(a, b) {
+        var r = 0;
+        if (sortKey === 'type') { r = (a.type < b.type) ? -1 : (a.type > b.type ? 1 : 0); }
+        else if (sortKey === 'other') { r = (a.other < b.other) ? -1 : (a.other > b.other ? 1 : 0); }
+        else { r = a.amount - b.amount; }
+        return r * sortDir;
+    });
     document.getElementById('detailTitle').textContent = '用户' + activeNode + '与其他人员的交易详情';
     var html = '';
     for (var j = 0; j < rows.length; j++) {
@@ -708,8 +741,8 @@ function drawWatermark() {
     ctx.fillStyle = C.watermark;
     ctx.textAlign = 'left';
     ctx.textBaseline = 'bottom';
-    if (mode === 'ios') { ctx.fillText('资金流水走向分析工具 Github@drpasserby(WLXC)', 18, H - 14); }
-    else { ctx.fillText('资金流水走向分析工具 Github@drpasserby(WLXC)', 16, H - 12); }
+    if (mode === 'ios') { ctx.fillText('资金流水走向分析工具 GitHub@drpasserby(WLXC)', 18, H - 14); }
+    else { ctx.fillText('资金流水走向分析工具 GitHub@drpasserby(WLXC)', 16, H - 12); }
 }
 
 function drawArrow(x, y, angle, color, alpha) {
@@ -1045,6 +1078,27 @@ document.getElementById('cbAmount').addEventListener('change', function() {
 document.getElementById('cbHideOther').addEventListener('change', function() {
     hideOthers = this.checked;
     draw();
+});
+/* 交易详情表：点击表头切换排序（交易类型/客户方/金额，升/降序） */
+function setDetailSort(key) {
+    if (sortKey === key) { sortDir = -sortDir; }
+    else { sortKey = key; sortDir = (key === 'amount') ? -1 : 1; }
+    draw();
+}
+var detailThead = document.getElementById('detailTable').getElementsByTagName('thead')[0];
+detailThead.addEventListener('click', function(e) {
+    var t = e.target;
+    while (t && t.nodeName !== 'TH') { t = t.parentNode; }
+    if (!t || !t.id) { return; }
+    tap();
+    if (t.id === 'thType') { setDetailSort('type'); }
+    else if (t.id === 'thOther') { setDetailSort('other'); }
+    else if (t.id === 'thAmount') { setDetailSort('amount'); }
+});
+detailThead.addEventListener('keydown', function(e) {
+    if (e.key !== 'Enter' && e.key !== ' ') { return; }
+    var t = e.target;
+    if (t && t.nodeName === 'TH') { e.preventDefault(); tap(); t.click(); }
 });
 var titleText = document.getElementById('titleText');
 document.getElementById('titleInput').addEventListener('input', function() {
