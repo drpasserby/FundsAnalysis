@@ -1,12 +1,13 @@
 """
 资金流水走向分析工具
-版本：1.2.1
+版本：1.2.2
 作者：wulvxinchen
 """
 
 import tkinter as tk
 from tkinter import filedialog
 from tkinter import messagebox
+import os
 import sys
 import json
 import math
@@ -15,26 +16,78 @@ import networkx as nx
 from collections import defaultdict
 
 
-# ================= 选择数据文件 =================
+# ================= 选择数据文件与生成风格 =================
+def choose_file_and_style(root):
+    """弹窗：使用提示 + 选择数据文件 + 选择生成的 HTML 风格（默认经典布局）。
+    返回 (file_path, style)，style 为 'classic' 或 'ios'；用户取消则返回 None。"""
+    dialog = tk.Toplevel(root)
+    dialog.title('生成资金流向图')
+    dialog.resizable(False, False)
+    dialog.attributes('-topmost', True)  # 置顶显示
+    dialog.grab_set()  # 模态窗口
+
+    result = {'path': None, 'style': 'classic'}
+
+    # 使用提示：说明可读文件格式与表格内容格式
+    tk.Label(dialog, text='可读取的文件格式：Excel（.xlsx / .xls）',
+             anchor='w', justify='left').pack(fill='x', padx=16, pady=(14, 2))
+    tk.Label(dialog, text='表格内容格式（第 1 行为表头）：',
+             anchor='w', justify='left').pack(fill='x', padx=16)
+    tk.Label(dialog, text='用户方 | 支出/收入 | 客户方 | 金额（元）',
+             anchor='w', justify='left', font=('Microsoft YaHei UI', 10, 'bold')).pack(fill='x', padx=16, pady=(0, 2))
+    tk.Label(dialog, text='（若表头与预设不一致，仍按默认列位读取：\n第 1 列=用户方、第 2 列=支出/收入、第 3 列=客户方、第 4 列=金额）',
+             anchor='w', justify='left', fg='#555555').pack(fill='x', padx=16, pady=(0, 8))
+
+    # 文件选择行
+    file_var = tk.StringVar(value='（未选择文件）')
+    file_frame = tk.Frame(dialog)
+    tk.Entry(file_frame, textvariable=file_var, width=34, state='readonly').pack(side='left', padx=(12, 6))
+
+    def pick_file():
+        p = filedialog.askopenfilename(
+            parent=dialog, title='选择数据文件',
+            filetypes=[('Excel 文件', '*.xlsx;*.xls'), ('所有文件', '*.*')])
+        if p:
+            result['path'] = p
+            file_var.set(os.path.basename(p))
+
+    tk.Button(file_frame, text='选择文件...', command=pick_file).pack(side='left')
+    file_frame.pack(pady=6)
+
+    # 风格选择行
+    style_var = tk.StringVar(value='classic')
+    tk.Label(dialog, text='HTML 风格：', anchor='w').pack(fill='x', padx=16)
+    tk.Radiobutton(dialog, text='经典布局（默认）', value='classic', variable=style_var).pack(anchor='w', padx=28)
+    tk.Radiobutton(dialog, text='iOS 布局', value='ios', variable=style_var).pack(anchor='w', padx=28)
+
+    def confirm():
+        if not result['path']:
+            messagebox.showwarning('提示', '请先选择数据文件。', parent=dialog)
+            return
+        result['style'] = style_var.get()
+        dialog.destroy()
+
+    def cancel():
+        result['path'] = None
+        dialog.destroy()
+
+    tk.Button(dialog, text='生成', width=14, command=confirm).pack(pady=(8, 4))
+    dialog.protocol('WM_DELETE_WINDOW', cancel)
+
+    dialog.wait_window()  # 阻塞直到对话框关闭
+
+    if not result['path']:
+        return None
+    return result['path'], result['style']
+
+
 root = tk.Tk()
 root.withdraw()  # 隐藏主窗口
 
-# 使用提示：说明可读文件格式与表格内容格式
-messagebox.showinfo(
-    '使用提示',
-    '可读取的文件格式：Excel（.xlsx / .xls）\n'
-    '\n'
-    '表格内容格式（第 1 行为表头）：\n'
-    '用户方 | 支出/收入 | 客户方 | 金额（元）\n'
-    '\n'
-    '点击“确定”后选择数据文件。')
-
-file_path = filedialog.askopenfilename(
-    title='选择数据文件',
-    filetypes=[('Excel 文件', '*.xlsx;*.xls'), ('所有文件', '*.*')])
-
-if not file_path:
+choice = choose_file_and_style(root)
+if choice is None:
     sys.exit()  # 用户取消选择，正常退出
+file_path, html_style = choice
 
 df = pd.read_excel(file_path, sheet_name='Sheet1', header=0)
 
@@ -50,12 +103,12 @@ def validate_and_clean(raw_df):
             '请确认数据格式为：用户方 | 支出/收入 | 客户方 | 金额'.format(raw_df.shape[1]))
         sys.exit(1)
 
-    # 表头软校验（仅提示，不阻断）
+    # 表头软校验（仅提示，不阻断）：列位始终按默认顺序读取，不依赖表头文字。
+    # 若表头与预设不一致，仍按 第 1 列=用户方、第 2 列=支出/收入、第 3 列=客户方、第 4 列=金额 读取。
     headers = [str(h) for h in raw_df.columns[:4]]
-    if not ('收入' in headers[1] or '支出' in headers[1]):
-        messages.append('提示：第 2 列表头“{}”未包含“支出/收入”'.format(headers[1]))
-    if '金额' not in headers[3]:
-        messages.append('提示：第 4 列表头“{}”未包含“金额”'.format(headers[3]))
+    if not ('收入' in headers[1] or '支出' in headers[1]) or '金额' not in headers[3]:
+        messages.append('提示：表头与预设不一致（应为 用户方|支出/收入|客户方|金额），'
+                        '已按默认列位读取：第 1 列=用户方，第 2 列=支出/收入，第 3 列=客户方，第 4 列=金额')
 
     cleaned = []
     bad_rows = []
@@ -318,8 +371,9 @@ contract = build_contract(G)
 
 
 # ================= HTML 输出（自包含交互式查看器） =================
-def generate_html(contract, title='资金流水分析演示图', show_amount=True, hide_other=True):
+def generate_html(contract, title='资金流水分析演示图', show_amount=True, hide_other=True, default_mode='classic'):
     """生成自包含的交互式 HTML：数据内嵌、离线可用（JS 保持 ES5 兼容旧浏览器）。
+    default_mode：初始界面风格（'classic' 经典布局 / 'ios' iOS 布局），默认经典布局。
     内置两套界面风格，可在设置面板切换：
       · 经典（原 1.1.7 风格）——顶栏图例、方形按钮、居中设置弹窗、朴素表格；
       · iOS（Apple iOS 设计语言）——系统字体、毛玻璃、圆角卡片、深浅色自适应、
@@ -335,6 +389,18 @@ def generate_html(contract, title='资金流水分析演示图', show_amount=Tru
     hide_checked = ' checked' if hide_other else ''
     show_js = 'true' if show_amount else 'false'
     hide_js = 'true' if hide_other else 'false'
+
+    # 初始界面风格：经典布局（默认）或 iOS 布局
+    if default_mode == 'ios':
+        body_class = 'mode-ios'
+        mode_js = 'ios'
+        seg_classic = 'seg-btn'
+        seg_ios = 'seg-btn active'
+    else:
+        body_class = 'mode-classic'
+        mode_js = 'classic'
+        seg_classic = 'seg-btn active'
+        seg_ios = 'seg-btn'
 
     return '''<!DOCTYPE html>
 <html lang="zh-CN">
@@ -494,7 +560,7 @@ body.mode-ios #detailTable td.empty { color:var(--text-2); }
 @media (prefers-reduced-motion: reduce) { * { animation:none !important; transition-duration:0.01ms !important; } }
 </style>
 </head>
-<body class="mode-ios">
+<body class="''' + body_class + '''">
 <div id="page">
 <h2 id="titleText">''' + safe_title + '''</h2>
 <div id="legendClassic"><span style="color:#c0392b;">——净流入</span> <span style="color:#2e8b57;">——净流出</span></div>
@@ -517,8 +583,8 @@ body.mode-ios #detailTable td.empty { color:var(--text-2); }
     <div class="row" id="uiStyleRow" role="radiogroup" aria-label="界面风格">
       <span class="rowLabel">界面风格</span>
       <span class="seg">
-        <button type="button" class="seg-btn" data-mode="classic" aria-label="经典">经典</button>
-        <button type="button" class="seg-btn active" data-mode="ios" aria-label="iOS">iOS</button>
+        <button type="button" class="''' + seg_classic + '''" data-mode="classic" aria-label="经典">经典</button>
+        <button type="button" class="''' + seg_ios + '''" data-mode="ios" aria-label="iOS">iOS</button>
       </span>
     </div>
     <label class="row"><span class="switch"><input type="checkbox" id="cbAmount"''' + amt_checked + '''><span class="track"></span><span class="thumb"></span></span><span class="rowLabel">显示金额</span></label>
@@ -555,7 +621,7 @@ var hideOthers = ''' + hide_js + ''';
 var canvas = document.getElementById('canvas');
 var ctx = canvas.getContext('2d');
 var W, H;
-var mode = 'ios';  // 'ios' | 'classic'
+var mode = ''' + "'" + mode_js + "'" + ''';  // 'ios' | 'classic'
 
 var nodeIndex = Object.create(null);
 for (var k = 0; k < nodes.length; k++) { nodeIndex[nodes[k].id] = nodes[k]; }
@@ -638,7 +704,7 @@ function resizeCanvas() {
     if (mode === 'ios') { dp.style.width = W + 'px'; dp.style.maxWidth = '100%'; }
     draw();
 }
-C = readColors();
+C = (mode === 'ios') ? readColors() : CLASSIC;
 resizeCanvas();
 
 function px(n) { return (PADDING + n.x * (W - 2 * PADDING)) * scale + panX; }
@@ -1160,7 +1226,7 @@ window.addEventListener('resize', resizeCanvas);
 </html>'''
 
 
-html = generate_html(contract, title='资金流水分析演示图', hide_other=True)
+html = generate_html(contract, title='资金流水分析演示图', hide_other=True, default_mode=html_style)
 with open('资金流向图.html', 'w', encoding='utf-8') as f:
     f.write(html)
 if sys.stdout is not None:
