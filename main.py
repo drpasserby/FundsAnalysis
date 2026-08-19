@@ -1,6 +1,6 @@
 """
 资金流水走向分析工具
-版本：1.2.4
+版本：1.2.5
 作者：wulvxinchen
 """
 
@@ -12,22 +12,34 @@ import sys
 import json
 import math
 import re
+import time
 import pandas as pd
 import networkx as nx
 from collections import defaultdict
 
 
+# ================= 聚合口径 =================
+# 支出/收入记录不一致时，边金额以谁为准（语义详见 build_graphs 文档字符串）
+POLICIES = [
+    ('spend', '以支出方为准'),
+    ('recv', '以收入方为准'),
+    ('max', '取大去重'),
+    ('sum', '双向求和'),
+]
+POLICY_LABELS = dict(POLICIES)
+
+
 # ================= 选择数据文件与生成风格 =================
 def choose_file_and_style(root):
     """弹窗：使用提示 + 选择数据文件 + 选择生成的 HTML 风格（默认经典布局）。
-    返回 (file_path, style)，style 为 'classic' 或 'ios'；用户取消则返回 None。"""
+    返回 (file_path, style, policy)；用户取消则返回 None。"""
     dialog = tk.Toplevel(root)
     dialog.title('生成资金流向图')
     dialog.resizable(False, False)
     dialog.attributes('-topmost', True)  # 置顶显示
     dialog.grab_set()  # 模态窗口
 
-    result = {'path': None, 'style': 'classic'}
+    result = {'path': None, 'style': 'classic', 'policy': 'spend'}
 
     # 使用提示：说明可读文件格式与表格内容格式
     tk.Label(dialog, text='可读取的文件格式：Excel（.xlsx / .xls）',
@@ -61,11 +73,18 @@ def choose_file_and_style(root):
     tk.Radiobutton(dialog, text='经典布局（默认）', value='classic', variable=style_var).pack(anchor='w', padx=28)
     tk.Radiobutton(dialog, text='iOS 布局', value='ios', variable=style_var).pack(anchor='w', padx=28)
 
+    # 聚合口径选择行
+    tk.Label(dialog, text='聚合口径（双方记录不一致时以谁为准）：', anchor='w').pack(fill='x', padx=16, pady=(8, 0))
+    policy_var = tk.StringVar(value='spend')
+    for pv, pl in POLICIES:
+        tk.Radiobutton(dialog, text=pl, value=pv, variable=policy_var).pack(anchor='w', padx=28)
+
     def confirm():
         if not result['path']:
             messagebox.showwarning('提示', '请先选择数据文件。', parent=dialog)
             return
         result['style'] = style_var.get()
+        result['policy'] = policy_var.get()
         dialog.destroy()
 
     def cancel():
@@ -79,7 +98,7 @@ def choose_file_and_style(root):
 
     if not result['path']:
         return None
-    return result['path'], result['style']
+    return result['path'], result['style'], result['policy']
 
 
 # ================= 数据校验与清洗 =================
@@ -152,14 +171,21 @@ def validate_and_clean(raw_df):
 
 
 # ================= 图构建（一次遍历，按节点对聚合“不重复”的双向流水） =================
-def build_graphs(df):
-    """一次遍历，按无序节点对聚合“不重复”的双向流水。
-    对每一对 (a, b)：
-      a→b 流向 = max(a支出b总额, b收入a总额)  —— “a支出b”与“b收入a”是同一笔资金，只算一次；
-      b→a 流向 = max(b支出a总额, a收入b总额)  —— 同理。
-    同一对的两笔真实往来分别保留，不做 X-Y 相减。
-    返回无向图 G，每对节点一条边，属性 out=a→b 不重复总额、inn=b→a 不重复总额
-    （(a, b) 为规范序：a 为字典序较小端，每对只出现一次）。
+def build_graphs(df, policy='spend'):
+    """一次遍历，按无序节点对聚合双向流水，并按所选聚合口径取值。
+    对每一对 (a, b)（a 为字典序较小端）：
+      · spend[(a,b)]：a 记“支出”给 b 的总额（钱 a→b）
+      · recv[(a,b)]：b 记“收入”自 a 的总额（钱 a→b，双方视角的同一批交易）
+    聚合口径 policy（双方记录不一致时以谁为准）：
+      · 'spend'：以支出方为准（默认）；该方向无支出记录时回退用收入记录，避免丢边
+      · 'recv' ：以收入方为准；无收入记录时回退用支出记录
+      · 'max'  ：取大去重（1.2.4 之前的行为）
+      · 'sum'  ：双向求和（仅当确认双方是相互独立的记录时使用，可能重复计）
+    注意：数据无交易编号时，无法区分“同一笔交易的双方记账差异”与“多笔独立交易”，
+    因此聚合口径是研究者的显式选择而非自动猜测；差异明细由 audit_consistency() 输出。
+    返回无向图 G，每对节点一条边：
+      out=a→b 口径金额、inn=b→a 口径金额，
+      sab/rab= a→b 的支出方/收入方合计、sba/rba= b→a 的支出方/收入方合计（供一致性审计）。
     """
     spend = defaultdict(float)  # spend[(付款方, 收款方)] = 付款方记的“支出”总额
     recv = defaultdict(float)   # recv[(付款方, 收款方)] = 收款方记的“收入”总额（钱从付款方流向收款方）
@@ -182,16 +208,58 @@ def build_graphs(df):
     G = nx.Graph()
     pairs = {}
     for (a, b) in set(spend) | set(recv):
-        pairs[(min(a, b), max(a, b))] = True  # 每对只保留一个规范方向，避免双向流水互相覆盖
+        pairs[(min(a, b), max(a, b))] = True  # 每对只保留一个规范方向
     for (a, b) in sorted(pairs):
-        ab = max(spend.get((a, b), 0.0), recv.get((a, b), 0.0))  # a→b 不重复总额
-        ba = max(spend.get((b, a), 0.0), recv.get((b, a), 0.0))  # b→a 不重复总额
-        G.add_edge(a, b, out=ab, inn=ba)
+        sa, ra = spend.get((a, b), 0.0), recv.get((a, b), 0.0)  # a→b
+        sb, rb = spend.get((b, a), 0.0), recv.get((b, a), 0.0)  # b→a
+        if policy == 'spend':
+            ab = sa if sa > 0 else ra
+            ba = sb if sb > 0 else rb
+        elif policy == 'recv':
+            ab = ra if ra > 0 else sa
+            ba = rb if rb > 0 else sb
+        elif policy == 'max':
+            ab = max(sa, ra)
+            ba = max(sb, rb)
+        elif policy == 'sum':
+            ab = sa + ra
+            ba = sb + rb
+        else:
+            raise ValueError('未知聚合口径：{!r}（可选 spend/recv/max/sum）'.format(policy))
+        G.add_edge(a, b, out=ab, inn=ba, sab=sa, rab=ra, sba=sb, rba=rb)
     return G
 
 
+def audit_consistency(G, tol=0.01):
+    """逐对比较支出方/收入方合计，返回不一致明细列表（按差异降序）。
+    每条记录：{a, b, spend, recv, diff, ratio, one_sided}
+      · spend/recv：方向 a→b 的支出方/收入方合计（金额四舍五入到分）
+      · diff：|spend - recv|（大于 tol 才记录）
+      · ratio：diff / max(spend, recv) * 100（%）
+      · one_sided：只有单侧记录（spend==0 或 recv==0）
+    """
+    rows = []
+    for u, v in sorted(G.edges()):
+        info = G[u][v]
+        for a, b, sp, rv in ((u, v, info.get('sab', 0.0), info.get('rab', 0.0)),
+                             (v, u, info.get('sba', 0.0), info.get('rba', 0.0))):
+            if sp <= 0 and rv <= 0:
+                continue
+            diff = abs(sp - rv)
+            if diff > tol:
+                rows.append({
+                    'a': a, 'b': b,
+                    'spend': round(sp, 2), 'recv': round(rv, 2),
+                    'diff': round(diff, 2),
+                    'ratio': round(diff / max(sp, rv) * 100, 1) if max(sp, rv) else 0.0,
+                    'one_sided': (sp == 0) or (rv == 0),
+                })
+    rows.sort(key=lambda r: -r['diff'])
+    return rows
+
+
 # ================= 数据契约（供 HTML 渲染使用） =================
-def build_contract(G):
+def build_contract(G, tol=0.01):
     """生成 HTML 端使用的数据契约：坐标归一化到 [0,1]，节点大小设上限。
     布局后做重叠消除，配合 HTML 端的半径缩放，任意窗口尺寸下圆圈互不遮挡。
     返回 {'nodes': [...], 'edges': [...]}；每条边 amount=source→target 不重复总额，
@@ -342,14 +410,19 @@ def build_contract(G):
             edges.append({
                 'source': source,
                 'target': target,
-                'amount': info['out'],
-                'back': info['inn'],
+                'amount': round(info['out'], 2),
+                'back': round(info['inn'], 2),
+                'sab': round(info.get('sab', 0.0), 2),
+                'rab': round(info.get('rab', 0.0), 2),
+                'sba': round(info.get('sba', 0.0), 2),
+                'rba': round(info.get('rba', 0.0), 2),
             })
         return edges
 
     return {
         'nodes': nodes_json,
         'edges': edge_list(G),
+        'audit': audit_consistency(G, tol),
     }
 
 
@@ -439,6 +512,18 @@ body { display:flex; flex-direction:column; align-items:center;
 #detailTable tbody tr:nth-child(even) { background:#fafafa; }
 #detailTable tbody tr:hover { background:#f0f7ff; }
 #detailTable td.empty { color:#999; }
+/* ================= 数据一致性面板（经典） ================= */
+#auditPanel { display:none; margin:16px auto 40px; width:80%; max-width:1000px;
+               min-width:400px; font-size:14px; color:#333; }
+#auditTitle { text-align:center; font-size:17px; margin:0 0 4px; }
+#auditPolicy { text-align:center; font-size:13px; color:#666; margin:0 0 10px; }
+#auditTable { border-collapse:collapse; width:100%; background:#fff; }
+#auditTable th, #auditTable td { border:1px solid #dcdcdc; padding:6px 12px; text-align:center; }
+#auditTable th { background:#f0f4f8; color:#333; font-weight:bold; }
+#auditTable tbody tr:nth-child(even) { background:#fafafa; }
+#auditTable td.diff { color:#c0392b; font-weight:bold; }
+#auditTable td.oneside { color:#e67e22; }
+.dashline { display:inline-block; width:14px; border-top:1.5px dashed #999; margin-right:7px; vertical-align:middle; }
 /* ================= iOS 界面覆盖（body.mode-ios） ================= */
 body.mode-ios { background:var(--bg); color:var(--text); -webkit-font-smoothing:antialiased;
   -webkit-tap-highlight-color:transparent;
@@ -511,16 +596,29 @@ body.mode-ios #detailTable td { padding:13px 16px; color:var(--text); }
 body.mode-ios #detailTable tbody tr:last-child td { border-bottom:none; }
 body.mode-ios #detailTable tbody tr:nth-child(even) { background:transparent; }
 body.mode-ios #detailTable td.empty { color:var(--text-2); }
+body.mode-ios #auditPanel { margin:24px auto 48px; width:80%; max-width:100%; font-size:15px; color:var(--text); }
+body.mode-ios #auditTitle { font-size:24px; font-weight:700; letter-spacing:-0.02em; margin:0 0 4px; color:var(--text); }
+body.mode-ios #auditPolicy { color:var(--text-2); font-size:13px; margin:0 0 16px; }
+body.mode-ios #auditTable { border-collapse:separate; border-spacing:0; background:var(--card-solid);
+  border-radius:18px; overflow:hidden; box-shadow:var(--shadow-sm); }
+body.mode-ios #auditTable th, body.mode-ios #auditTable td { border:0; border-bottom:0.5px solid var(--separator); }
+body.mode-ios #auditTable th { background:transparent; color:var(--text-2); font-size:13px; font-weight:600; padding:14px 16px 8px; }
+body.mode-ios #auditTable td { padding:13px 16px; color:var(--text); }
+body.mode-ios #auditTable tbody tr:last-child td { border-bottom:none; }
+body.mode-ios #auditTable td.diff { color:var(--expense); }
+body.mode-ios #auditTable td.oneside { color:#ff9f0a; }
+body.mode-ios .dashline { border-top-color:var(--edge); }
 @media (prefers-reduced-motion: reduce) { * { animation:none !important; transition-duration:0.01ms !important; } }
 </style>
 </head>
 <body class="{{BODY_CLASS}}">
 <div id="page">
 <h2 id="titleText">资金流水分析演示图</h2>
-<div id="legendClassic"><span style="color:#c0392b;">——净流入</span> <span style="color:#2e8b57;">——净流出</span></div>
+<div id="legendClassic"><span style="color:#c0392b;">——净流入</span> <span style="color:#2e8b57;">——净流出</span> <span style="margin-left:14px;border-top:1.5px dashed #999;"> 记录不一致</span></div>
 <div id="legendIos">
   <span><span class="dot" style="background:#ff3b30;"></span>净流入</span>
   <span><span class="dot" style="background:#34c759;"></span>净流出</span>
+  <span><span class="dashline"></span>记录不一致</span>
 </div>
 <div id="canvasWrap">
 <canvas id="canvas" role="img" aria-label="资金流向图，点击圆圈查看其交易详情"></canvas>
@@ -544,6 +642,8 @@ body.mode-ios #detailTable td.empty { color:var(--text-2); }
     <label class="row"><span class="switch"><input type="checkbox" id="cbAmount"{{AMT_CHECKED}}><span class="track"></span><span class="thumb"></span></span><span class="rowLabel">显示金额</span></label>
     <label class="row" title="开启后点击某个圆圈，只显示该用户及其直接关联的圆圈和连线"><span class="switch"><input type="checkbox" id="cbHideOther"{{HIDE_CHECKED}}><span class="track"></span><span class="thumb"></span></span><span class="rowLabel">隐藏其他</span></label>
     <div class="row" id="titleRow"><span class="rowLabel">标题</span><input type="text" id="titleInput" value="资金流水分析演示图" aria-label="标题"></div>
+    <div class="row" id="policyRow"><span class="rowLabel">聚合口径</span><span class="rowVal">{{POLICY_LABEL}}</span></div>
+    <div class="row" id="auditRow"><span class="rowLabel">数据一致性</span><span class="rowVal">{{AUDIT_LINE}}</span></div>
     <button id="settingsClose" type="button" aria-label="完成并关闭"><span class="t-classic">关闭</span><span class="t-ios">完成</span></button>
   </div>
 </div>
@@ -559,10 +659,21 @@ body.mode-ios #detailTable td.empty { color:var(--text-2); }
     <tbody id="detailBody"></tbody>
   </table>
 </div>
+<div id="auditPanel">
+  <h3 id="auditTitle">数据一致性检查</h3>
+  <div id="auditPolicy">聚合口径：{{POLICY_LABEL}}　差异容差：0.01 元</div>
+  <table id="auditTable">
+    <thead><tr>
+      <th>用户方</th><th>客户方</th><th>方向</th><th>支出方金额</th><th>收入方金额</th><th>差异</th><th>占比</th><th>单侧</th>
+    </tr></thead>
+    <tbody id="auditBody"></tbody>
+  </table>
+</div>
 </div>
 <script>
 var nodes = {{NODES_JSON}};
 var edges = {{EDGES_JSON}};
+var auditRows = {{AUDIT_JSON}};
 var PADDING = 80;
 var radiusScale = 1;  // 节点半径随画布最小边缩放，防止不同窗口尺寸下圆圈互相遮挡
 var scale = 1, panX = 0, panY = 0;
@@ -660,6 +771,7 @@ function resizeCanvas() {
 }
 C = (mode === 'ios') ? readColors() : CLASSIC;
 resizeCanvas();
+renderAudit();
 
 function px(n) { return (PADDING + n.x * (W - 2 * PADDING)) * scale + panX; }
 function py(n) { return (PADDING + n.y * (H - 2 * PADDING)) * scale + panY; }
@@ -801,6 +913,8 @@ function drawEdges() {
     if (activeNode !== null) { connected = Object.create(null); connected[activeNode] = true; }
     for (var i = 0; i < edges.length; i++) {
         var e = edges[i];
+        // 双方记录不一致（差异超过 0.01 元）时虚线 + ⚠ 标记
+        var inconsistent = (Math.abs(e.sab - e.rab) > 0.01) || (Math.abs(e.sba - e.rba) > 0.01);
         if (hideOthers && activeNode !== null && e.source !== activeNode && e.target !== activeNode) { continue; }
         var sn = nodeIndex[e.source];
         var tn = nodeIndex[e.target];
@@ -841,7 +955,9 @@ function drawEdges() {
         ctx.strokeStyle = lineColor;
         ctx.lineWidth = 1.6;
         ctx.globalAlpha = alpha;
+        if (inconsistent) { ctx.setLineDash([6, 4]); }
         ctx.stroke();
+        if (inconsistent) { ctx.setLineDash([]); }
         ctx.globalAlpha = 1;
 
         // 箭头：仅当活动节点为端点且存在净流向。净流出箭头指向对方，净流入箭头指向活动节点。
@@ -874,9 +990,9 @@ function drawEdges() {
             var label;
             if (isActiveEnd) {
                 // 从活动节点视角显示“不重复”的支出与收入
-                label = '支出 ' + fmt(out) + '  收入 ' + fmt(in_);
+                label = (inconsistent ? '⚠ ' : '') + '支出 ' + fmt(out) + '  收入 ' + fmt(in_);
             } else {
-                label = e.source + '→' + e.target + ':' + fmt(e.amount) + '  ' + e.target + '→' + e.source + ':' + fmt(e.back);
+                label = (inconsistent ? '⚠ ' : '') + e.source + '→' + e.target + ':' + fmt(e.amount) + '  ' + e.target + '→' + e.source + ':' + fmt(e.back);
             }
             ctx.font = (mode === 'ios')
                 ? '11px -apple-system, "Helvetica Neue", "PingFang SC", "Microsoft YaHei", sans-serif'
@@ -1004,6 +1120,22 @@ function drawTooltip() {
     for (var p = 0; p < lines.length; p++) {
         ctx.fillText(lines[p], bx2 + 10, by2 + 7 + p * 19);
     }
+}
+
+function renderAudit() {
+    var panel = document.getElementById('auditPanel');
+    var body = document.getElementById('auditBody');
+    if (!auditRows || auditRows.length === 0) { panel.style.display = 'none'; return; }
+    var html = '';
+    for (var i = 0; i < auditRows.length; i++) {
+        var r = auditRows[i];
+        html += '<tr><td>' + esc(r.a) + '</td><td>' + esc(r.b) + '</td><td>' + esc(r.a) + ' \u2192 ' + esc(r.b) + '</td>'
+              + '<td>' + fmt(r.spend) + '</td><td>' + fmt(r.recv) + '</td>'
+              + '<td class="diff">' + fmt(r.diff) + '</td><td>' + r.ratio.toFixed(1) + '%</td>'
+              + '<td class="oneside">' + (r.one_sided ? '单侧' : '') + '</td></tr>';
+    }
+    body.innerHTML = html;
+    panel.style.display = 'block';
 }
 
 function getMousePos(e) {
@@ -1196,10 +1328,11 @@ window.addEventListener('resize', resizeCanvas);
 
 
 def generate_html(contract, title='资金流水分析演示图', show_amount=True, hide_other=True,
-                  default_mode='classic', template_file=None):
+                  default_mode='classic', template_file=None, policy_label='以支出方为准'):
     """生成自包含的交互式 HTML：数据内嵌、离线可用（JS 保持 ES5 兼容旧浏览器）。
     default_mode：初始界面风格（'classic' 经典布局 / 'ios' iOS 布局），默认经典布局。
     template_file：可选的外部 HTML 模板路径；缺省使用内嵌的 TEMPLATE_HTML（测试可显式注入）。
+    policy_label：聚合口径的中文说明，写入页面设置与数据一致性面板，便于口径追溯。
     内置两套界面风格，可在设置面板切换：
       · 经典（原 1.1.7 风格）——顶栏图例、方形按钮、居中设置弹窗、朴素表格；
       · iOS（Apple iOS 设计语言）——系统字体、毛玻璃、圆角卡片、深浅色自适应、
@@ -1209,6 +1342,15 @@ def generate_html(contract, title='资金流水分析演示图', show_amount=Tru
     """
     nodes_json = json.dumps(contract['nodes'], ensure_ascii=False).replace('</', '<\\/')
     edges_json = json.dumps(contract['edges'], ensure_ascii=False).replace('</', '<\\/')
+    audit = contract.get('audit') or []
+    audit_json = json.dumps(audit, ensure_ascii=False).replace('</', '<\\/')
+    safe_policy = (policy_label.replace('&', '&amp;').replace('<', '&lt;')
+                   .replace('>', '&gt;').replace('"', '&quot;'))
+    if audit:
+        total_diff = sum(r['diff'] for r in audit)
+        audit_line = '发现 {} 处不一致，差异合计 {:.2f} 元'.format(len(audit), total_diff)
+    else:
+        audit_line = '全部一致（无差异）'
     safe_title = (title.replace('&', '&amp;').replace('<', '&lt;')
                        .replace('>', '&gt;').replace('"', '&quot;'))
     amt_checked = ' checked' if show_amount else ''
@@ -1240,6 +1382,9 @@ def generate_html(contract, title='资金流水分析演示图', show_amount=Tru
         'SEG_CLASSIC': seg_classic,
         'SEG_IOS': seg_ios,
         'MODE_JS': mode_js,
+        'POLICY_LABEL': safe_policy,
+        'AUDIT_LINE': audit_line,
+        'AUDIT_JSON': audit_json,
     }
     if template_file:
         with open(template_file, encoding='utf-8') as f:
@@ -1252,6 +1397,42 @@ def generate_html(contract, title='资金流水分析演示图', show_amount=Tru
 
 
 
+
+def write_audit_report(path, contract, policy_label, tol=0.01):
+    """把数据一致性检查结果写入文本报告，便于研究存档与核查。"""
+    audit = contract.get('audit') or []
+    edges = contract.get('edges') or []
+    lines = []
+    lines.append('资金流水走向分析工具 — 数据一致性报告')
+    lines.append('=' * 56)
+    lines.append('生成时间：{}'.format(time.strftime('%Y-%m-%d %H:%M:%S')))
+    lines.append('聚合口径：{}'.format(policy_label))
+    lines.append('差异容差：{} 元'.format(tol))
+    total_diff = sum(r['diff'] for r in audit)
+    lines.append('')
+    lines.append('统计：共 {} 对节点，其中 {} 处方向记录不一致；差异合计 {:.2f} 元。'
+                 .format(len(edges), len(audit), total_diff))
+    lines.append('-' * 56)
+    if not audit:
+        lines.append('未发现不一致记录。')
+    else:
+        for i, r in enumerate(audit, 1):
+            tag = '（单侧记录）' if r['one_sided'] else ''
+            lines.append('[{}] {} → {}'.format(i, r['a'], r['b']))
+            lines.append('    支出方记录：{:.2f} 元'.format(r['spend']))
+            lines.append('    收入方记录：{:.2f} 元'.format(r['recv']))
+            lines.append('    差异：{:.2f} 元（{:.1f}%）{}'.format(r['diff'], r['ratio'], tag))
+    lines.append('-' * 56)
+    lines.append('说明：')
+    lines.append('1. 图上金额 = 按所选聚合口径计算；“以支出方为准”时金额=支出方合计，')
+    lines.append('   仅当该方向无支出记录时回退使用收入记录（避免丢边）。')
+    lines.append('2. 因数据无交易编号，无法区分“同一笔交易的双方记账差异”与“多笔独立交易”，')
+    lines.append('   差异部分请结合原始流水人工核查后再下结论。')
+    lines.append('3. 如需精确配对，建议在透视表中保留 交易ID/流水号/时间 字段。')
+    with open(path, 'w', encoding='utf-8') as f:
+        f.write('\n'.join(lines) + '\n')
+
+
 def main():
     """主流程：选择文件与风格 → 读取 → 校验 → 构图 → 生成 HTML。"""
     root = tk.Tk()
@@ -1260,7 +1441,7 @@ def main():
     choice = choose_file_and_style(root)
     if choice is None:
         return  # 用户取消选择，正常退出
-    file_path, html_style = choice
+    file_path, html_style, policy = choice
 
     try:
         # 默认读取工作簿第一张表（不再硬编码 Sheet1）
@@ -1273,14 +1454,29 @@ def main():
         if df.empty:
             sys.exit('没有可用的有效数据，程序退出。')
 
-        G = build_graphs(df)
+        G = build_graphs(df, policy=policy)
         contract = build_contract(G)
 
-        html = generate_html(contract, title='资金流水分析演示图', hide_other=True, default_mode=html_style)
+        audit = contract.get('audit') or []
+        if audit:
+            total_diff = sum(r['diff'] for r in audit)
+            lines = ['数据一致性检查：发现 {} 处方向记录不一致，差异合计 {:.2f} 元。'
+                     .format(len(audit), total_diff)]
+            for r in audit[:10]:
+                lines.append('{} → {}：支出方 {} / 收入方 {}（差 {}，{:.1f}%）'
+                             .format(r['a'], r['b'], r['spend'], r['recv'], r['diff'], r['ratio']))
+            if len(audit) > 10:
+                lines.append('……共 {} 处，完整明细见 数据一致性报告.txt 与页面底部面板'
+                             .format(len(audit)))
+            messagebox.showwarning('数据一致性提示', '\n'.join(lines))
+
+        html = generate_html(contract, title='资金流水分析演示图', hide_other=True,
+                             default_mode=html_style, policy_label=POLICY_LABELS[policy])
         with open('资金流向图.html', 'w', encoding='utf-8') as f:
             f.write(html)
+        write_audit_report('数据一致性报告.txt', contract, POLICY_LABELS[policy])
         if sys.stdout is not None:
-            print('已生成 资金流向图.html，双击即可在浏览器中离线使用。')
+            print('已生成 资金流向图.html 与 数据一致性报告.txt，双击 HTML 即可在浏览器中离线使用。')
     except Exception as e:
         messagebox.showerror('程序运行出错', '生成过程中出错了：\n{}'.format(e))
         return
