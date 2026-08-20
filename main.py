@@ -1,6 +1,6 @@
 """
 资金流水走向分析工具
-版本：1.2.5
+版本：1.2.6
 作者：wulvxinchen
 """
 
@@ -179,7 +179,7 @@ def build_graphs(df, policy='spend'):
     聚合口径 policy（双方记录不一致时以谁为准）：
       · 'spend'：以支出方为准（默认）；该方向无支出记录时回退用收入记录，避免丢边
       · 'recv' ：以收入方为准；无收入记录时回退用支出记录
-      · 'max'  ：取大去重（1.2.4 之前的行为）
+      · 'max'  ：取大去重（旧版默认行为）
       · 'sum'  ：双向求和（仅当确认双方是相互独立的记录时使用，可能重复计）
     注意：数据无交易编号时，无法区分“同一笔交易的双方记账差异”与“多笔独立交易”，
     因此聚合口径是研究者的显式选择而非自动猜测；差异明细由 audit_consistency() 输出。
@@ -512,6 +512,8 @@ body { display:flex; flex-direction:column; align-items:center;
 #detailTable tbody tr:nth-child(even) { background:#fafafa; }
 #detailTable tbody tr:hover { background:#f0f7ff; }
 #detailTable td.empty { color:#999; }
+#detailTable th.chk, #detailTable td.chk { width:44px; }
+#detailTable input.tx-chk, #detailTable #chkAll { width:16px; height:16px; cursor:pointer; vertical-align:middle; margin:0; }
 /* ================= 数据一致性面板（经典） ================= */
 #auditPanel { display:none; margin:16px auto 40px; width:80%; max-width:1000px;
                min-width:400px; font-size:14px; color:#333; }
@@ -652,6 +654,7 @@ body.mode-ios .dashline { border-top-color:var(--edge); }
   <h3 id="detailTitle">用户与其他人员的交易详情</h3>
   <table id="detailTable">
     <thead><tr>
+      <th id="thChk" class="chk" aria-label="全选/全不选"><input type="checkbox" id="chkAll" checked></th>
       <th id="thType" role="button" tabindex="0" aria-sort="none">交易类型 <span class="sortArrow" id="arrowType"></span></th>
       <th id="thOther" role="button" tabindex="0" aria-sort="none">客户方 <span class="sortArrow" id="arrowOther"></span></th>
       <th id="thAmount" role="button" tabindex="0" aria-sort="none">金额 <span class="sortArrow" id="arrowAmount"></span></th>
@@ -679,6 +682,9 @@ var radiusScale = 1;  // 节点半径随画布最小边缩放，防止不同窗�
 var scale = 1, panX = 0, panY = 0;
 var activeNode = null, hoverNode = null;
 var sortKey = 'amount', sortDir = -1;  // 交易详情表排序状态：默认按金额降序
+var uncheckedKeys = Object.create(null);  // 被取消勾选的交易（默认全选）
+var detailRows = [];                       // 当前明细行（含勾选键）
+var lastDetailSig = '';                    // 明细表重建签名：活动节点+排序
 var showAmount = {{SHOW_JS}};
 var hideOthers = {{HIDE_JS}};
 /* 单边视图：每对用户一条线（source→target 为 amount，反向为 back），默认黑色 */
@@ -847,35 +853,54 @@ function renderDetail() {
         }
     }
     if (activeNode === null) { panel.style.display = 'none'; return; }
-    var rows = [];
-    for (var i = 0; i < edges.length; i++) {
-        var e = edges[i];
-        if (e.source === activeNode) {
-            rows.push({ type: '支出', other: e.target, amount: e.amount });
-            rows.push({ type: '收入', other: e.target, amount: e.back });
-        } else if (e.target === activeNode) {
-            rows.push({ type: '支出', other: e.source, amount: e.back });
-            rows.push({ type: '收入', other: e.source, amount: e.amount });
+    // 内容签名：活动节点与排序未变时重建表格会丢失勾选焦点，故跳过重建
+    var sig = activeNode + '|' + sortKey + '|' + sortDir;
+    if (sig !== lastDetailSig) {
+        lastDetailSig = sig;
+        var rows = [];
+        for (var i = 0; i < edges.length; i++) {
+            var e = edges[i];
+            if (e.source === activeNode) {
+                rows.push({ type: '支出', other: e.target, amount: e.amount });
+                rows.push({ type: '收入', other: e.target, amount: e.back });
+            } else if (e.target === activeNode) {
+                rows.push({ type: '支出', other: e.source, amount: e.back });
+                rows.push({ type: '收入', other: e.source, amount: e.amount });
+            }
         }
+        rows.sort(function(a, b) {
+            var r = 0;
+            if (sortKey === 'type') { r = (a.type < b.type) ? -1 : (a.type > b.type ? 1 : 0); }
+            else if (sortKey === 'other') { r = (a.other < b.other) ? -1 : (a.other > b.other ? 1 : 0); }
+            else { r = a.amount - b.amount; }
+            return r * sortDir;
+        });
+        detailRows = rows;
+        document.getElementById('detailTitle').textContent = '用户' + activeNode + '与其他人员的交易详情';
+        var html = '';
+        for (var j = 0; j < rows.length; j++) {
+            var r = rows[j];
+            var color = (r.type === '收入') ? C.income : C.expense;
+            var on = !uncheckedKeys[r.other + '|' + r.type];
+            html += '<tr><td class="chk"><input type="checkbox" class="tx-chk" data-idx="' + j + '"' + (on ? ' checked' : '') + ' aria-label="仅显示该笔交易"></td>'
+                  + '<td style="color:' + color + ';">' + esc(r.type) + '</td><td>' + esc(r.other) + '</td><td>' + fmt(r.amount) + '</td></tr>';
+        }
+        if (rows.length === 0) {
+            html += '<tr><td colspan="4" class="empty">暂无交易记录</td></tr>';
+        }
+        document.getElementById('detailBody').innerHTML = html;
     }
-    rows.sort(function(a, b) {
-        var r = 0;
-        if (sortKey === 'type') { r = (a.type < b.type) ? -1 : (a.type > b.type ? 1 : 0); }
-        else if (sortKey === 'other') { r = (a.other < b.other) ? -1 : (a.other > b.other ? 1 : 0); }
-        else { r = a.amount - b.amount; }
-        return r * sortDir;
-    });
-    document.getElementById('detailTitle').textContent = '用户' + activeNode + '与其他人员的交易详情';
-    var html = '';
-    for (var j = 0; j < rows.length; j++) {
-        var r = rows[j];
-        var color = (r.type === '收入') ? C.income : C.expense;
-        html += '<tr><td style="color:' + color + ';">' + esc(r.type) + '</td><td>' + esc(r.other) + '</td><td>' + fmt(r.amount) + '</td></tr>';
+    // 全选框状态：全部勾选 / 全部取消 / 部分勾选（每次调用更新，勾选变化不重建表格也能同步）
+    var chkAll = document.getElementById('chkAll');
+    var anyUn = false, anyOn = false;
+    for (var ui = 0; ui < detailRows.length; ui++) {
+        if (uncheckedKeys[detailRows[ui].other + '|' + detailRows[ui].type]) { anyUn = true; }
+        else { anyOn = true; }
     }
-    if (rows.length === 0) {
-        html += '<tr><td colspan="3" class="empty">暂无交易记录</td></tr>';
-    }
-    document.getElementById('detailBody').innerHTML = html;
+    if (detailRows.length === 0) { chkAll.checked = true; chkAll.indeterminate = false; }
+    else if (anyUn && anyOn) { chkAll.checked = false; chkAll.indeterminate = true; }
+    else if (anyUn) { chkAll.checked = false; chkAll.indeterminate = false; }
+    else { chkAll.checked = true; chkAll.indeterminate = false; }
     panel.style.display = 'block';
 }
 
@@ -928,10 +953,17 @@ function drawEdges() {
         // 是否以活动节点为端点：是则可按活动节点视角计算净流向
         var isActiveEnd = (activeNode !== null) && (e.source === activeNode || e.target === activeNode);
         var isSrc = (e.source === activeNode);   // 活动节点在边的 source 端
-        var out, in_;
+        var out, in_, outOn = true, inOn = true;
         if (isActiveEnd) {
             out = isSrc ? e.amount : e.back;     // 活动节点流向对方
             in_ = isSrc ? e.back : e.amount;     // 对方流向活动节点
+            // 交易勾选过滤：只显示勾选中的交易方向（默认全选）
+            var oth = isSrc ? e.target : e.source;
+            outOn = !uncheckedKeys[oth + '|支出'];
+            inOn = !uncheckedKeys[oth + '|收入'];
+            if (!outOn && !inOn) { continue; }   // 两向都未勾选：整条边隐藏
+            if (!outOn) { out = 0; }
+            if (!inOn) { in_ = 0; }
         }
 
         // 颜色：默认黑色（iOS 用主题中性色保证深浅色下可见）；
@@ -989,8 +1021,11 @@ function drawEdges() {
         if (showAmount) {
             var label;
             if (isActiveEnd) {
-                // 从活动节点视角显示“不重复”的支出与收入
-                label = (inconsistent ? '⚠ ' : '') + '支出 ' + fmt(out) + '  收入 ' + fmt(in_);
+                // 从活动节点视角显示勾选中的支出与收入（未勾选方向不显示）
+                var lblParts = [];
+                if (outOn) { lblParts.push('支出 ' + fmt(out)); }
+                if (inOn) { lblParts.push('收入 ' + fmt(in_)); }
+                label = (inconsistent ? '⚠ ' : '') + lblParts.join('  ');
             } else {
                 label = (inconsistent ? '⚠ ' : '') + e.source + '→' + e.target + ':' + fmt(e.amount) + '  ' + e.target + '→' + e.source + ':' + fmt(e.back);
             }
@@ -1156,11 +1191,17 @@ function nodeAt(mx, my) {
     return null;
 }
 
+function setActiveNode(id) {
+    if (activeNode === id) { return; }
+    activeNode = id;
+    uncheckedKeys = Object.create(null);  // 切换节点后恢复默认全选
+    draw();
+}
+
 canvas.addEventListener('click', function(e) {
     var m = getMousePos(e);
     var id = nodeAt(m.x, m.y);
-    activeNode = (id !== null) ? id : null;
-    draw();
+    setActiveNode((id !== null) ? id : null);
 });
 
 canvas.addEventListener('mousemove', function(e) {
@@ -1207,7 +1248,7 @@ canvas.addEventListener('touchstart', function(e) {
     if (t.length !== 1) { return; }
     var m = getMousePos(t[0]);
     var hit = nodeAt(m.x, m.y);
-    if (hit !== null) { activeNode = hit; tap(); draw(); return; }
+    if (hit !== null) { setActiveNode(hit); tap(); return; }
     dragging = true; lastX = t[0].clientX; lastY = t[0].clientY;
     canvas.style.cursor = 'grabbing';
 }, { passive: true });
@@ -1267,6 +1308,26 @@ detailThead.addEventListener('keydown', function(e) {
     var t = e.target;
     if (t && t.nodeName === 'TH') { e.preventDefault(); tap(); t.click(); }
 });
+/* 交易勾选过滤：只显示勾选中的交易连线（可多选，默认全选） */
+document.getElementById('detailBody').addEventListener('change', function(e) {
+    var cb = e.target;
+    if (!cb || cb.className !== 'tx-chk') { return; }
+    var idx = parseInt(cb.getAttribute('data-idx'), 10);
+    var r = detailRows[idx];
+    if (!r) { return; }
+    var key = r.other + '|' + r.type;
+    if (cb.checked) { delete uncheckedKeys[key]; }
+    else { uncheckedKeys[key] = true; }
+    draw();
+});
+document.getElementById('chkAll').addEventListener('change', function() {
+    var on = this.checked;
+    uncheckedKeys = Object.create(null);
+    if (!on) {
+        for (var i = 0; i < detailRows.length; i++) { uncheckedKeys[detailRows[i].other + '|' + detailRows[i].type] = true; }
+    }
+    draw();
+});
 var titleText = document.getElementById('titleText');
 document.getElementById('titleInput').addEventListener('input', function() {
     var v = this.value || '资金流向图';
@@ -1306,7 +1367,7 @@ for (var q = 0; q < segBtns.length; q++) {
 }
 document.getElementById('refreshBtn').addEventListener('click', function() {
     tap();
-    activeNode = null;
+    setActiveNode(null);
     scale = 1; panX = 0; panY = 0;
     draw();
 });
@@ -1339,6 +1400,8 @@ def generate_html(contract, title='资金流水分析演示图', show_amount=Tru
         弹簧动画、安全区适配、底部弹窗设置、iOS 开关；iOS 风格下箭头收于圆圈下方不遮挡名字。
     其余交互：点击高亮、悬浮提示、滚轮缩放、拖拽平移、触屏手势、刷新视图；
     点击某用户后画布下方以表格展示其交易详情（交易类型/客户方/金额），不点击不显示。
+    表格首列为勾选框（默认全选）：取消勾选即只显示对应交易的连线，可多选；
+    某个方向的交易被取消后，该方向的金额不计入连线与箭头，两向都取消则整条边隐藏。
     """
     nodes_json = json.dumps(contract['nodes'], ensure_ascii=False).replace('</', '<\\/')
     edges_json = json.dumps(contract['edges'], ensure_ascii=False).replace('</', '<\\/')
