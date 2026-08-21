@@ -1,6 +1,6 @@
 """
 资金流水走向分析工具
-版本：1.2.6
+版本：1.2.7
 作者：wulvxinchen
 """
 
@@ -1461,23 +1461,289 @@ def generate_html(contract, title='资金流水分析演示图', show_amount=Tru
 
 
 
-def write_audit_report(path, contract, policy_label, tol=0.01):
-    """把数据一致性检查结果写入文本报告，便于研究存档与核查。"""
+def analyze_flow(edges, top_n=5, tol=0.01):
+    """对契约边做初步资金流向分析（仅供研究参考，不构成审计结论）。
+    edges：build_contract 产出的边列表（含 amount/back 口径金额）。
+    返回 dict：total / nodes / edge_count / net_in / net_out / top_flows /
+    concentration / top3_in / beneficiary / chain / cycles。
+    """
+    nodes = set()
+    inflow, outflow = {}, {}
+    for e in edges:
+        s, t = e['source'], e['target']
+        nodes.add(s)
+        nodes.add(t)
+        inflow.setdefault(s, 0.0)
+        inflow.setdefault(t, 0.0)
+        outflow.setdefault(s, 0.0)
+        outflow.setdefault(t, 0.0)
+        outflow[s] += e['amount']
+        inflow[t] += e['amount']
+        outflow[t] += e['back']
+        inflow[s] += e['back']
+    nodes = sorted(nodes)
+    total = sum(inflow.values())
+    sig = max(tol, total * 0.001)  # 显著净额阈值：流转总额的 0.1%
+
+    net = {n: inflow[n] - outflow[n] for n in nodes}
+    net_in = sorted([(n, net[n]) for n in nodes if net[n] > sig], key=lambda x: -x[1])
+    net_out = sorted([(n, -net[n]) for n in nodes if net[n] < -sig], key=lambda x: -x[1])
+
+    flows = []
+    for e in edges:
+        if e['amount'] > tol:
+            flows.append((e['amount'], e['source'], e['target']))
+        if e['back'] > tol:
+            flows.append((e['back'], e['target'], e['source']))
+    flows.sort(key=lambda x: -x[0])
+    top_flows = flows[:top_n]
+
+    # 资金集中度：前 3 大归集主体的流入占全网比例
+    conc = 0.0
+    top3_in = []
+    if total > 0:
+        inflow_sorted = sorted(nodes, key=lambda n: -inflow[n])
+        top3_in = inflow_sorted[:3]
+        conc = sum(inflow[n] for n in top3_in) / total
+
+    # 疑似最终收益方：净流入居前且再流出占比低（资金沉淀率高）
+    beneficiary = None
+    cands = []
+    for n in nodes:
+        if inflow[n] > sig:
+            retain = 1.0 - outflow[n] / inflow[n] if inflow[n] > 0 else 0.0
+            cands.append((n, net[n], inflow[n], outflow[n], retain))
+    if cands:
+        cands.sort(key=lambda x: (-x[1], -x[4]))
+        n, netv, inv, outv, retain = cands[0]
+        if netv > sig:
+            beneficiary = {'node': n, 'net': netv, 'inflow': inv, 'outflow': outv, 'retain': retain}
+
+    # 资金传导链：最大净流出方 → 最大净流入方 的最短路径
+    chain = None
+    if net_out and net_in:
+        DG = nx.DiGraph()
+        for e in edges:
+            if e['amount'] > tol:
+                DG.add_edge(e['source'], e['target'])
+            if e['back'] > tol:
+                DG.add_edge(e['target'], e['source'])
+        s, tgt = net_out[0][0], net_in[0][0]
+        try:
+            path = nx.shortest_path(DG, s, tgt)
+            if len(path) >= 2:
+                chain = path
+        except (nx.NetworkXNoPath, nx.NodeNotFound):
+            chain = None
+
+    # 资金回流环（有向简单环：仅保留最短的若干个，防性能问题）
+    cycles = []
+    if len(edges) <= 200:
+        DG = nx.DiGraph()
+        for e in edges:
+            if e['amount'] > tol:
+                DG.add_edge(e['source'], e['target'])
+            if e['back'] > tol:
+                DG.add_edge(e['target'], e['source'])
+        try:
+            scan = 0
+            for c in nx.simple_cycles(DG):
+                scan += 1
+                if scan > 3000:
+                    break
+                if len(c) >= 3:
+                    cycles.append(c)
+                    cycles.sort(key=len)
+                    cycles = cycles[:5]
+                    if len(cycles) == 5 and len(cycles[-1]) == 3:
+                        break
+        except Exception:
+            cycles = []
+
+    return {
+        'total': total,
+        'nodes': nodes,
+        'edge_count': len(edges),
+        'net_in': net_in,
+        'net_out': net_out,
+        'top_flows': top_flows,
+        'concentration': conc,
+        'top3_in': top3_in,
+        'beneficiary': beneficiary,
+        'chain': chain,
+        'cycles': cycles,
+    }
+
+
+def _fmt_amt(v):
+    """金额千分位格式，如 1,234,567.89。"""
+    return '{:,.2f}'.format(v)
+
+
+def _fmt_pct(ratio):
+    """比例（0~1）转百分比文本。"""
+    return '{:.1f}%'.format(ratio * 100)
+
+
+def format_analysis_section(analysis):
+    """把 analyze_flow 的结果组织为「专业但不失清晰」的参考分析段落。"""
+    lines = []
+    total = analysis['total']
+    nodes = analysis['nodes']
+    if total <= 0 or not nodes:
+        lines.append('未检测到有效资金流动（流转总额为 0），暂无法给出流向研判。')
+        return lines
+
+    net_in = analysis['net_in']
+    net_out = analysis['net_out']
+    top_flows = analysis['top_flows']
+    conc = analysis['concentration']
+    ben = analysis['beneficiary']
+    chain = analysis['chain']
+    cycles = analysis['cycles']
+
+    total_in = sum(x[1] for x in net_in)
+    total_out = sum(x[1] for x in net_out)
+    shift_ratio = (total_in + total_out) / 2.0 / total if total > 0 else 0.0
+
+    # ===== 核心结论 =====
+    lines.append('【核心结论】')
+    if net_out:
+        src_txt = '、'.join(x[0] for x in net_out[:3])
+        lines.append('1. 资金总体上由 {} 等供给端主体流出，'.format(src_txt))
+    else:
+        lines.append('1. 未发现显著单向净流出主体，资金以双向往来为主；')
+    if net_in:
+        dst_txt = '、'.join(x[0] for x in net_in[:3])
+        lines.append('   向 {} 等归集端主体聚拢；'.format(dst_txt))
+    if top_flows:
+        amt, a, b = top_flows[0]
+        lines.append('2. 最大资金通道为 {} → {}（约 {} 元），系网络核心资金动脉；'.format(a, b, _fmt_amt(amt)))
+    if ben:
+        lines.append('3. 综合研判，{} 疑似为资金最终收益方（净流入 {} 元，沉淀率 {}）。'.format(
+            ben['node'], _fmt_amt(ben['net']), _fmt_pct(ben['retain'])))
+    else:
+        lines.append('3. 暂未识别出明显的单一最终收益方。')
+    lines.append('')
+
+    # ===== 网络概览 =====
+    lines.append('【网络概览】')
+    lines.append('本期资金网络共涉及 {} 个主体、{} 条资金通道，资金流转总额约 {} 元。'.format(
+        len(nodes), analysis['edge_count'], _fmt_amt(total)))
+    if shift_ratio < 0.05:
+        lines.append('网络整体收支大体均衡，资金以双向往来为主，单向净转移规模有限（约占总流转的 {}）。'.format(_fmt_pct(shift_ratio)))
+    elif shift_ratio < 0.20:
+        lines.append('网络存在一定程度的单向净转移：净转移规模约占总流转的 {}，资金呈定向流动特征。'.format(_fmt_pct(shift_ratio)))
+    else:
+        lines.append('网络呈显著单向净转移态势：净转移规模约占总流转的 {}，资金沿明确方向由供给端流向归集端。'.format(_fmt_pct(shift_ratio)))
+    lines.append('')
+
+    # ===== 资金供给端 =====
+    lines.append('【资金供给端（主要净流出方）】')
+    if net_out:
+        for i, (n, v) in enumerate(net_out[:5], 1):
+            lines.append('  {}. {}：净流出 {} 元'.format(i, n, _fmt_amt(v)))
+        lines.append('上述主体合计净流出约 {} 元，构成网络的主要资金供给端。'.format(_fmt_amt(total_out)))
+    else:
+        lines.append('未发现显著净流出主体，各主体收支大体自平衡。')
+    lines.append('')
+
+    # ===== 资金归集端 =====
+    lines.append('【资金归集端（主要净流入方）】')
+    if net_in:
+        for i, (n, v) in enumerate(net_in[:5], 1):
+            lines.append('  {}. {}：净流入 {} 元'.format(i, n, _fmt_amt(v)))
+        lines.append('上述主体合计净流入约 {} 元，为网络的主要资金归集端。'.format(_fmt_amt(total_in)))
+    else:
+        lines.append('未发现显著净流入主体，资金呈均衡分布。')
+    lines.append('')
+
+    # ===== 大额资金通道 =====
+    lines.append('【大额资金通道】')
+    if top_flows:
+        for i, (amt, a, b) in enumerate(top_flows[:5], 1):
+            lines.append('  {}. {} → {}：{} 元（占流转总额 {}）'.format(
+                i, a, b, _fmt_amt(amt), _fmt_pct(amt / total)))
+    else:
+        lines.append('未发现显著大额单笔通道。')
+    lines.append('')
+
+    # ===== 资金集中度 =====
+    lines.append('【资金集中度】')
+    if total > 0 and analysis['top3_in']:
+        names = '、'.join(analysis['top3_in'])
+        if conc >= 0.5:
+            degree = '头部效应显著，资金高度向少数主体聚集'
+        elif conc >= 0.3:
+            degree = '呈中度集中格局'
+        else:
+            degree = '相对分散，未形成明显头部聚集'
+        lines.append('前 3 大归集主体（{}）合计吸纳全网 {} 的资金，{}。'.format(
+            names, _fmt_pct(conc), degree))
+    else:
+        lines.append('数据量有限，暂不评估资金集中度。')
+    lines.append('')
+
+    # ===== 疑似最终收益方 =====
+    lines.append('【疑似最终收益方（初步研判，仅供参考）】')
+    if ben:
+        if ben['retain'] >= 0.5:
+            lines.append('综合净流入规模与资金沉淀特征研判，{} 最可能为资金的最终归集方：'.format(ben['node']))
+            lines.append('  净流入 {} 元，再流出仅 {} 元（沉淀率 {}），资金在其处形成显著沉淀，'.format(
+                _fmt_amt(ben['net']), _fmt_amt(ben['outflow']), _fmt_pct(ben['retain'])))
+            lines.append('  疑似为网络内的终端受益人。')
+        else:
+            lines.append('净流入居前的 {} 资金沉淀率较低（{}），呈“过手”特征，'.format(
+                ben['node'], _fmt_pct(ben['retain'])))
+            lines.append('  更可能为资金中转枢纽而非终端受益人，终端归集方需结合更深层数据进一步识别。')
+    else:
+        lines.append('未发现明显的单一最终归集方（净流入主体资金多呈过手特征或规模相当）。')
+    lines.append('')
+
+    # ===== 资金传导链 =====
+    lines.append('【资金传导链】')
+    if chain and len(chain) >= 3:
+        lines.append('资金沿「{}」路径逐级传导，'.format(' → '.join(chain)))
+        lines.append('中间环节（{}）兼具收付职能，疑似资金中转枢纽。'.format('、'.join(chain[1:-1])))
+    elif chain and len(chain) == 2:
+        lines.append('最大净流出方与最大净流入方存在直接资金往来（{} → {}），主体间以直接通道为主。'.format(chain[0], chain[1]))
+    else:
+        lines.append('未发现明显的多级传导链，主体间以直接往来为主。')
+    lines.append('')
+
+    # ===== 资金回流提示 =====
+    lines.append('【资金回流提示】')
+    if cycles:
+        lines.append('检测到疑似资金回流环（仅列示前 {} 个）：'.format(len(cycles)))
+        for c in cycles:
+            lines.append('  ' + ' → '.join(c) + ' → ' + c[0])
+        lines.append('网络内存在资金循环流动的可能，建议结合业务背景与原始凭证进一步核查。')
+    else:
+        lines.append('未检测到明显的资金回流闭环。')
+    return lines
+
+
+def write_analysis_report(path, contract, policy_label, tol=0.01, source_file=''):
+    """生成合并报告：数据一致性检查 + 资金流向参考分析（初步研判，仅供参考）。"""
     audit = contract.get('audit') or []
     edges = contract.get('edges') or []
     lines = []
-    lines.append('资金流水走向分析工具 — 数据一致性报告')
+    lines.append('资金流水走向分析工具 — 资金流水分析报告')
     lines.append('=' * 56)
     lines.append('生成时间：{}'.format(time.strftime('%Y-%m-%d %H:%M:%S')))
+    if source_file:
+        lines.append('数据文件：{}'.format(os.path.basename(source_file)))
     lines.append('聚合口径：{}'.format(policy_label))
     lines.append('差异容差：{} 元'.format(tol))
-    total_diff = sum(r['diff'] for r in audit)
     lines.append('')
+
+    lines.append('一、数据一致性检查')
+    lines.append('-' * 56)
+    total_diff = sum(r['diff'] for r in audit)
     lines.append('统计：共 {} 对节点，其中 {} 处方向记录不一致；差异合计 {:.2f} 元。'
                  .format(len(edges), len(audit), total_diff))
-    lines.append('-' * 56)
     if not audit:
-        lines.append('未发现不一致记录。')
+        lines.append('未发现不一致记录，双方记账口径基本吻合。')
     else:
         for i, r in enumerate(audit, 1):
             tag = '（单侧记录）' if r['one_sided'] else ''
@@ -1485,15 +1751,26 @@ def write_audit_report(path, contract, policy_label, tol=0.01):
             lines.append('    支出方记录：{:.2f} 元'.format(r['spend']))
             lines.append('    收入方记录：{:.2f} 元'.format(r['recv']))
             lines.append('    差异：{:.2f} 元（{:.1f}%）{}'.format(r['diff'], r['ratio'], tag))
+    lines.append('')
+
+    lines.append('二、资金流向参考分析（初步研判，仅供参考）')
     lines.append('-' * 56)
-    lines.append('说明：')
+    analysis = analyze_flow(edges, tol=tol)
+    lines.extend(format_analysis_section(analysis))
+    lines.append('')
+
+    lines.append('三、口径与局限说明')
+    lines.append('-' * 56)
     lines.append('1. 图上金额 = 按所选聚合口径计算；“以支出方为准”时金额=支出方合计，')
     lines.append('   仅当该方向无支出记录时回退使用收入记录（避免丢边）。')
     lines.append('2. 因数据无交易编号，无法区分“同一笔交易的双方记账差异”与“多笔独立交易”，')
     lines.append('   差异部分请结合原始流水人工核查后再下结论。')
-    lines.append('3. 如需精确配对，建议在透视表中保留 交易ID/流水号/时间 字段。')
+    lines.append('3. 本报告第二节的分析结论由程序依据流水数据自动生成，属初步研判、仅供参考，')
+    lines.append('   不构成审计结论、鉴定意见或法律意见；请在结合原始凭证与业务背景后审慎使用。')
+    lines.append('4. 如需精确配对，建议在透视表中保留 交易ID/流水号/时间 字段。')
     with open(path, 'w', encoding='utf-8') as f:
         f.write('\n'.join(lines) + '\n')
+
 
 
 def main():
@@ -1529,7 +1806,7 @@ def main():
                 lines.append('{} → {}：支出方 {} / 收入方 {}（差 {}，{:.1f}%）'
                              .format(r['a'], r['b'], r['spend'], r['recv'], r['diff'], r['ratio']))
             if len(audit) > 10:
-                lines.append('……共 {} 处，完整明细见 数据一致性报告.txt 与页面底部面板'
+                lines.append('……共 {} 处，完整明细与参考分析见 资金流水分析报告.txt（页面底部面板仅列不一致明细）'
                              .format(len(audit)))
             messagebox.showwarning('数据一致性提示', '\n'.join(lines))
 
@@ -1537,9 +1814,9 @@ def main():
                              default_mode=html_style, policy_label=POLICY_LABELS[policy])
         with open('资金流向图.html', 'w', encoding='utf-8') as f:
             f.write(html)
-        write_audit_report('数据一致性报告.txt', contract, POLICY_LABELS[policy])
+        write_analysis_report('资金流水分析报告.txt', contract, POLICY_LABELS[policy], source_file=file_path)
         if sys.stdout is not None:
-            print('已生成 资金流向图.html 与 数据一致性报告.txt，双击 HTML 即可在浏览器中离线使用。')
+            print('已生成 资金流向图.html 与 资金流水分析报告.txt，双击 HTML 即可在浏览器中离线使用。')
     except Exception as e:
         messagebox.showerror('程序运行出错', '生成过程中出错了：\n{}'.format(e))
         return
