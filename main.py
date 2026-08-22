@@ -1,6 +1,6 @@
 """
 资金流水走向分析工具
-版本：1.2.7
+版本：1.3.0
 作者：wulvxinchen
 """
 
@@ -610,10 +610,86 @@ body.mode-ios #auditTable tbody tr:last-child td { border-bottom:none; }
 body.mode-ios #auditTable td.diff { color:var(--expense); }
 body.mode-ios #auditTable td.oneside { color:#ff9f0a; }
 body.mode-ios .dashline { border-top-color:var(--edge); }
+/* ================= 顶部导航 ================= */
+#topnav { position:sticky; top:0; z-index:60; display:flex; align-items:center; justify-content:space-between;
+  padding:10px 18px; background:var(--glass-bg); -webkit-backdrop-filter:saturate(180%) blur(14px); backdrop-filter:saturate(180%) blur(14px);
+  border-bottom:0.5px solid var(--separator); }
+#navBrand { font-size:13.5px; font-weight:600; color:var(--text); letter-spacing:0.02em; }
+#navTabs { display:flex; gap:3px; background:var(--fill); border-radius:999px; padding:3px; }
+.nav-btn { border:none; background:transparent; color:var(--text-2); font-size:12.5px; padding:6px 16px; border-radius:999px;
+  cursor:pointer; transition:all .18s ease; -webkit-user-select:none; user-select:none; }
+.nav-btn.active { background:var(--card-solid); color:var(--text); font-weight:600; box-shadow:var(--shadow-sm); }
+/* ================= 报告入口按钮 ================= */
+#entryBar { text-align:center; margin:16px 0 2px; }
+#reportEntry { border:none; cursor:pointer; background:var(--tint); color:#fff; font-size:14px; font-weight:600;
+  padding:11px 30px; border-radius:999px; box-shadow:0 4px 14px rgba(10,132,255,0.25);
+  transition:transform .18s ease, box-shadow .18s ease; -webkit-user-select:none; user-select:none; }
+#reportEntry:hover { transform:translateY(-1px); box-shadow:0 6px 18px rgba(10,132,255,0.32); }
+#reportEntry:active { transform:translateY(0); }
+#reportEntry .entryArrow { margin-left:8px; }
+/* ================= 资金流水分析报告（内置文档） ================= */
+#viewReport { display:none; }
+#backBar { max-width:880px; margin:22px auto 0; padding:0 12px; }
+#backToGraph { border:1px solid var(--separator); background:var(--card-solid); color:var(--text); font-size:13px;
+  padding:8px 18px; border-radius:999px; cursor:pointer; transition:all .18s ease; }
+#backToGraph:hover { border-color:var(--tint); color:var(--tint); }
+#reportDoc { max-width:880px; margin:16px auto 56px; padding:44px 52px; background:var(--card-solid);
+  border:0.5px solid var(--separator); border-radius:16px; box-shadow:var(--shadow-md);
+  color:var(--text); font-size:15px; line-height:1.85; }
+#reportDoc h1 { font-size:25px; font-weight:700; letter-spacing:-0.01em; margin:0 0 4px; color:var(--text); }
+#reportDoc h2 { font-size:18px; font-weight:700; margin:0 0 14px; color:var(--text); display:flex; align-items:center; gap:10px; }
+#reportDoc h2::before { content:''; width:4px; height:17px; border-radius:2px; background:var(--tint); flex:none; }
+#reportDoc h3 { font-size:14.5px; font-weight:600; color:var(--text); margin:20px 0 8px; }
+.rep-kicker { font-size:11.5px; letter-spacing:0.22em; color:var(--tint); font-weight:600; margin:0 0 6px; text-transform:uppercase; }
+.rep-meta { display:flex; flex-wrap:wrap; gap:8px; margin:16px 0 0; padding:14px 0 0; border-top:0.5px solid var(--separator); }
+.rep-meta span { font-size:12px; color:var(--text-2); background:var(--fill); border:0.5px solid var(--separator);
+  padding:4px 13px; border-radius:999px; }
+.rep-section { margin-top:34px; }
+.rep-sub { color:var(--text-2); font-size:13px; margin:-4px 0 4px; }
+.rep-stat { color:var(--text); margin:4px 0 10px; }
+.rep-pill { display:inline-block; font-size:12.5px; padding:4px 14px; border-radius:999px; border:0.5px solid var(--separator); background:var(--fill); }
+.rep-ok { color:var(--income); }
+.rep-warn { color:#d97706; }
+.rep-card { background:var(--fill); border:0.5px solid var(--separator); border-left:3px solid var(--tint); border-radius:10px; padding:14px 22px; margin:12px 0 4px; }
+.rep-card ol { margin:0; padding:0; list-style:none; counter-reset:core; }
+.rep-card li { counter-increment:core; position:relative; padding:7px 0 7px 36px; }
+.rep-card li::before { content:counter(core); position:absolute; left:0; top:10px; width:22px; height:22px; border-radius:50%;
+  background:var(--tint); color:#fff; font-size:12px; font-weight:600; display:flex; align-items:center; justify-content:center; }
+.rep-list { list-style:none; margin:6px 0 2px; padding:0; }
+.rep-list li { padding:5px 0 5px 24px; position:relative; color:var(--text); }
+.rep-list li::before { content:''; position:absolute; left:5px; top:15px; width:6px; height:6px; border-radius:50%; background:var(--text-2); opacity:0.55; }
+.rep-note { color:var(--text-2); font-size:13px; margin:9px 0; padding-left:20px; position:relative; }
+.rep-note::before { content:''; position:absolute; left:6px; top:9px; width:5px; height:5px; border-radius:50%; background:var(--tint); opacity:0.6; }
+.rep-table { width:100%; border-collapse:collapse; margin:12px 0 2px; font-size:13px; }
+.rep-table th { background:var(--fill); color:var(--text-2); font-weight:600; text-align:left; padding:9px 12px; border-bottom:0.5px solid var(--separator); }
+.rep-table td { padding:8px 12px; border-bottom:0.5px solid var(--separator); color:var(--text); }
+.rep-table tr:last-child td { border-bottom:none; }
+.rep-table td.diff { color:var(--expense); font-weight:600; }
+.rep-table td.one { color:#d97706; }
+.rep-footer { margin-top:38px; padding-top:18px; border-top:0.5px solid var(--separator); text-align:center; color:var(--text-2); font-size:12.5px; letter-spacing:0.02em; }
+.rep-footer a { color:var(--text-2); text-decoration:none; border-bottom:1px solid var(--separator); transition:color .18s ease, border-color .18s ease; }
+.rep-footer a:hover { color:var(--tint); border-color:var(--tint); }
+.rep-footer .rep-tool { font-weight:600; color:var(--text); }
+.rep-footer .rep-sep { opacity:0.5; }
+@media (max-width:720px) {
+  #reportDoc { padding:28px 20px; border-radius:12px; margin:12px 10px 40px; }
+  #topnav { padding:8px 12px; }
+  .nav-btn { padding:5px 12px; font-size:12px; }
+  #navBrand { display:none; }
+}
 @media (prefers-reduced-motion: reduce) { * { animation:none !important; transition-duration:0.01ms !important; } }
+
 </style>
 </head>
 <body class="{{BODY_CLASS}}">
+<nav id="topnav">
+  <span id="navBrand">资金流水走向分析工具</span>
+  <span id="navTabs">
+    <button type="button" class="nav-btn active" data-view="graph" aria-label="资金流向图">资金流向图</button>
+    <button type="button" class="nav-btn" data-view="report" aria-label="资金流水分析报告">资金流水分析报告</button>
+  </span>
+</nav>
+<div id="viewGraph">
 <div id="page">
 <h2 id="titleText">资金流水分析演示图</h2>
 <div id="legendClassic"><span style="color:#c0392b;">——净流入</span> <span style="color:#2e8b57;">——净流出</span> <span style="margin-left:14px;border-top:1.5px dashed #999;"> 记录不一致</span></div>
@@ -622,6 +698,7 @@ body.mode-ios .dashline { border-top-color:var(--edge); }
   <span><span class="dot" style="background:#34c759;"></span>净流出</span>
   <span><span class="dashline"></span>记录不一致</span>
 </div>
+<div id="entryBar"><button id="reportEntry" type="button" aria-label="查看资金流水分析报告">查看资金流水分析报告<span class="entryArrow">→</span></button></div>
 <div id="canvasWrap">
 <canvas id="canvas" role="img" aria-label="资金流向图，点击圆圈查看其交易详情"></canvas>
 <div id="zoomBtns">
@@ -672,6 +749,11 @@ body.mode-ios .dashline { border-top-color:var(--edge); }
     <tbody id="auditBody"></tbody>
   </table>
 </div>
+</div>
+</div>
+<div id="viewReport">
+  <div id="backBar"><button id="backToGraph" type="button" aria-label="返回资金流向图">← 返回资金流向图</button></div>
+  <div id="reportDoc">{{REPORT_HTML}}</div>
 </div>
 <script>
 var nodes = {{NODES_JSON}};
@@ -1328,7 +1410,35 @@ document.getElementById('chkAll').addEventListener('change', function() {
     }
     draw();
 });
+/* 视图切换：资金流向图 / 资金流水分析报告 */
+function switchView(name) {
+    var g = document.getElementById('viewGraph');
+    var r = document.getElementById('viewReport');
+    if (name === 'report') {
+        g.style.display = 'none';
+        r.style.display = 'block';
+    } else {
+        g.style.display = 'block';
+        r.style.display = 'none';
+        resizeCanvas();
+        draw();
+    }
+    var btns = document.querySelectorAll('.nav-btn');
+    for (var i = 0; i < btns.length; i++) {
+        btns[i].className = (btns[i].getAttribute('data-view') === name) ? 'nav-btn active' : 'nav-btn';
+    }
+    window.scrollTo(0, 0);
+}
+var navBtns = document.querySelectorAll('.nav-btn');
+for (var ni = 0; ni < navBtns.length; ni++) {
+    (function(btn) {
+        btn.addEventListener('click', function() { tap(); switchView(btn.getAttribute('data-view')); });
+    })(navBtns[ni]);
+}
+document.getElementById('reportEntry').addEventListener('click', function() { tap(); switchView('report'); });
+document.getElementById('backToGraph').addEventListener('click', function() { tap(); switchView('graph'); });
 var titleText = document.getElementById('titleText');
+
 document.getElementById('titleInput').addEventListener('input', function() {
     var v = this.value || '资金流向图';
     titleText.textContent = v;
@@ -1389,11 +1499,13 @@ window.addEventListener('resize', resizeCanvas);
 
 
 def generate_html(contract, title='资金流水分析演示图', show_amount=True, hide_other=True,
-                  default_mode='classic', template_file=None, policy_label='以支出方为准'):
+                  default_mode='classic', template_file=None, policy_label='以支出方为准',
+                  source_file=''):
     """生成自包含的交互式 HTML：数据内嵌、离线可用（JS 保持 ES5 兼容旧浏览器）。
     default_mode：初始界面风格（'classic' 经典布局 / 'ios' iOS 布局），默认经典布局。
     template_file：可选的外部 HTML 模板路径；缺省使用内嵌的 TEMPLATE_HTML（测试可显式注入）。
     policy_label：聚合口径的中文说明，写入页面设置与数据一致性面板，便于口径追溯。
+    source_file：源数据文件路径，写入报告元信息（可选）；报告内容已并入输出 HTML。
     内置两套界面风格，可在设置面板切换：
       · 经典（原 1.1.7 风格）——顶栏图例、方形按钮、居中设置弹窗、朴素表格；
       · iOS（Apple iOS 设计语言）——系统字体、毛玻璃、圆角卡片、深浅色自适应、
@@ -1414,6 +1526,7 @@ def generate_html(contract, title='资金流水分析演示图', show_amount=Tru
         audit_line = '发现 {} 处不一致，差异合计 {:.2f} 元'.format(len(audit), total_diff)
     else:
         audit_line = '全部一致（无差异）'
+    report_html = build_report_html(contract, policy_label, tol=0.01, source_file=source_file)
     safe_title = (title.replace('&', '&amp;').replace('<', '&lt;')
                        .replace('>', '&gt;').replace('"', '&quot;'))
     amt_checked = ' checked' if show_amount else ''
@@ -1448,6 +1561,7 @@ def generate_html(contract, title='资金流水分析演示图', show_amount=Tru
         'POLICY_LABEL': safe_policy,
         'AUDIT_LINE': audit_line,
         'AUDIT_JSON': audit_json,
+        'REPORT_HTML': report_html,
     }
     if template_file:
         with open(template_file, encoding='utf-8') as f:
@@ -1585,14 +1699,14 @@ def _fmt_pct(ratio):
     return '{:.1f}%'.format(ratio * 100)
 
 
-def format_analysis_section(analysis):
-    """把 analyze_flow 的结果组织为「专业但不失清晰」的参考分析段落。"""
-    lines = []
+def analysis_sentences(analysis):
+    """生成资金流向参考分析的结论语句（结构化，txt 与 HTML 共用）。
+    返回 [(章节标题, [句子...]), ...]；句子为纯文本（已含编号与金额）。
+    """
     total = analysis['total']
     nodes = analysis['nodes']
     if total <= 0 or not nodes:
-        lines.append('未检测到有效资金流动（流转总额为 0），暂无法给出流向研判。')
-        return lines
+        return [('网络概览', ['未检测到有效资金流动（流转总额为 0），暂无法给出流向研判。'])]
 
     net_in = analysis['net_in']
     net_out = analysis['net_out']
@@ -1601,75 +1715,52 @@ def format_analysis_section(analysis):
     ben = analysis['beneficiary']
     chain = analysis['chain']
     cycles = analysis['cycles']
-
     total_in = sum(x[1] for x in net_in)
     total_out = sum(x[1] for x in net_out)
     shift_ratio = (total_in + total_out) / 2.0 / total if total > 0 else 0.0
 
-    # ===== 核心结论 =====
-    lines.append('【核心结论】')
+    core = []
     if net_out:
-        src_txt = '、'.join(x[0] for x in net_out[:3])
-        lines.append('1. 资金总体上由 {} 等供给端主体流出，'.format(src_txt))
+        core.append('资金总体上由 {} 等供给端主体流出，向 {} 等归集端主体聚拢；'.format(
+            '、'.join(x[0] for x in net_out[:3]), '、'.join(x[0] for x in net_in[:3])))
     else:
-        lines.append('1. 未发现显著单向净流出主体，资金以双向往来为主；')
-    if net_in:
-        dst_txt = '、'.join(x[0] for x in net_in[:3])
-        lines.append('   向 {} 等归集端主体聚拢；'.format(dst_txt))
+        core.append('未发现显著单向净流出主体，资金以双向往来为主；')
     if top_flows:
         amt, a, b = top_flows[0]
-        lines.append('2. 最大资金通道为 {} → {}（约 {} 元），系网络核心资金动脉；'.format(a, b, _fmt_amt(amt)))
+        core.append('最大资金通道为 {} → {}（约 {} 元），系网络核心资金动脉；'.format(a, b, _fmt_amt(amt)))
     if ben:
-        lines.append('3. 综合研判，{} 疑似为资金最终收益方（净流入 {} 元，沉淀率 {}）。'.format(
+        core.append('综合研判，{} 疑似为资金最终收益方（净流入 {} 元，沉淀率 {}）。'.format(
             ben['node'], _fmt_amt(ben['net']), _fmt_pct(ben['retain'])))
     else:
-        lines.append('3. 暂未识别出明显的单一最终收益方。')
-    lines.append('')
+        core.append('暂未识别出明显的单一最终收益方。')
 
-    # ===== 网络概览 =====
-    lines.append('【网络概览】')
-    lines.append('本期资金网络共涉及 {} 个主体、{} 条资金通道，资金流转总额约 {} 元。'.format(
-        len(nodes), analysis['edge_count'], _fmt_amt(total)))
+    overview = ['本期资金网络共涉及 {} 个主体、{} 条资金通道，资金流转总额约 {} 元。'.format(
+        len(nodes), analysis['edge_count'], _fmt_amt(total))]
     if shift_ratio < 0.05:
-        lines.append('网络整体收支大体均衡，资金以双向往来为主，单向净转移规模有限（约占总流转的 {}）。'.format(_fmt_pct(shift_ratio)))
+        overview.append('网络整体收支大体均衡，资金以双向往来为主，单向净转移规模有限（约占总流转的 {}）。'.format(_fmt_pct(shift_ratio)))
     elif shift_ratio < 0.20:
-        lines.append('网络存在一定程度的单向净转移：净转移规模约占总流转的 {}，资金呈定向流动特征。'.format(_fmt_pct(shift_ratio)))
+        overview.append('网络存在一定程度的单向净转移：净转移规模约占总流转的 {}，资金呈定向流动特征。'.format(_fmt_pct(shift_ratio)))
     else:
-        lines.append('网络呈显著单向净转移态势：净转移规模约占总流转的 {}，资金沿明确方向由供给端流向归集端。'.format(_fmt_pct(shift_ratio)))
-    lines.append('')
+        overview.append('网络呈显著单向净转移态势：净转移规模约占总流转的 {}，资金沿明确方向由供给端流向归集端。'.format(_fmt_pct(shift_ratio)))
 
-    # ===== 资金供给端 =====
-    lines.append('【资金供给端（主要净流出方）】')
     if net_out:
-        for i, (n, v) in enumerate(net_out[:5], 1):
-            lines.append('  {}. {}：净流出 {} 元'.format(i, n, _fmt_amt(v)))
-        lines.append('上述主体合计净流出约 {} 元，构成网络的主要资金供给端。'.format(_fmt_amt(total_out)))
+        supply = ['  {}. {}：净流出 {} 元'.format(i, n, _fmt_amt(v)) for i, (n, v) in enumerate(net_out[:5], 1)]
+        supply.append('上述主体合计净流出约 {} 元，构成网络的主要资金供给端。'.format(_fmt_amt(total_out)))
     else:
-        lines.append('未发现显著净流出主体，各主体收支大体自平衡。')
-    lines.append('')
+        supply = ['未发现显著净流出主体，各主体收支大体自平衡。']
 
-    # ===== 资金归集端 =====
-    lines.append('【资金归集端（主要净流入方）】')
     if net_in:
-        for i, (n, v) in enumerate(net_in[:5], 1):
-            lines.append('  {}. {}：净流入 {} 元'.format(i, n, _fmt_amt(v)))
-        lines.append('上述主体合计净流入约 {} 元，为网络的主要资金归集端。'.format(_fmt_amt(total_in)))
+        collect = ['  {}. {}：净流入 {} 元'.format(i, n, _fmt_amt(v)) for i, (n, v) in enumerate(net_in[:5], 1)]
+        collect.append('上述主体合计净流入约 {} 元，为网络的主要资金归集端。'.format(_fmt_amt(total_in)))
     else:
-        lines.append('未发现显著净流入主体，资金呈均衡分布。')
-    lines.append('')
+        collect = ['未发现显著净流入主体，资金呈均衡分布。']
 
-    # ===== 大额资金通道 =====
-    lines.append('【大额资金通道】')
     if top_flows:
-        for i, (amt, a, b) in enumerate(top_flows[:5], 1):
-            lines.append('  {}. {} → {}：{} 元（占流转总额 {}）'.format(
-                i, a, b, _fmt_amt(amt), _fmt_pct(amt / total)))
+        channels = ['  {}. {} → {}：{} 元（占流转总额 {}）'.format(
+            i, a, b, _fmt_amt(amt), _fmt_pct(amt / total)) for i, (amt, a, b) in enumerate(top_flows[:5], 1)]
     else:
-        lines.append('未发现显著大额单笔通道。')
-    lines.append('')
+        channels = ['未发现显著大额单笔通道。']
 
-    # ===== 资金集中度 =====
-    lines.append('【资金集中度】')
     if total > 0 and analysis['top3_in']:
         names = '、'.join(analysis['top3_in'])
         if conc >= 0.5:
@@ -1678,49 +1769,142 @@ def format_analysis_section(analysis):
             degree = '呈中度集中格局'
         else:
             degree = '相对分散，未形成明显头部聚集'
-        lines.append('前 3 大归集主体（{}）合计吸纳全网 {} 的资金，{}。'.format(
-            names, _fmt_pct(conc), degree))
+        concentration = ['前 3 大归集主体（{}）合计吸纳全网 {} 的资金，{}。'.format(names, _fmt_pct(conc), degree)]
     else:
-        lines.append('数据量有限，暂不评估资金集中度。')
-    lines.append('')
+        concentration = ['数据量有限，暂不评估资金集中度。']
 
-    # ===== 疑似最终收益方 =====
-    lines.append('【疑似最终收益方（初步研判，仅供参考）】')
     if ben:
         if ben['retain'] >= 0.5:
-            lines.append('综合净流入规模与资金沉淀特征研判，{} 最可能为资金的最终归集方：'.format(ben['node']))
-            lines.append('  净流入 {} 元，再流出仅 {} 元（沉淀率 {}），资金在其处形成显著沉淀，'.format(
-                _fmt_amt(ben['net']), _fmt_amt(ben['outflow']), _fmt_pct(ben['retain'])))
-            lines.append('  疑似为网络内的终端受益人。')
+            beneficiary = ['综合净流入规模与资金沉淀特征研判，{} 最可能为资金的最终归集方：'.format(ben['node']),
+                           '  净流入 {} 元，再流出仅 {} 元（沉淀率 {}），资金在其处形成显著沉淀，'.format(
+                               _fmt_amt(ben['net']), _fmt_amt(ben['outflow']), _fmt_pct(ben['retain'])),
+                           '  疑似为网络内的终端受益人。']
         else:
-            lines.append('净流入居前的 {} 资金沉淀率较低（{}），呈“过手”特征，'.format(
-                ben['node'], _fmt_pct(ben['retain'])))
-            lines.append('  更可能为资金中转枢纽而非终端受益人，终端归集方需结合更深层数据进一步识别。')
+            beneficiary = ['净流入居前的 {} 资金沉淀率较低（{}），呈“过手”特征，'.format(ben['node'], _fmt_pct(ben['retain'])),
+                           '  更可能为资金中转枢纽而非终端受益人，终端归集方需结合更深层数据进一步识别。']
     else:
-        lines.append('未发现明显的单一最终归集方（净流入主体资金多呈过手特征或规模相当）。')
-    lines.append('')
+        beneficiary = ['未发现明显的单一最终归集方（净流入主体资金多呈过手特征或规模相当）。']
 
-    # ===== 资金传导链 =====
-    lines.append('【资金传导链】')
     if chain and len(chain) >= 3:
-        lines.append('资金沿「{}」路径逐级传导，'.format(' → '.join(chain)))
-        lines.append('中间环节（{}）兼具收付职能，疑似资金中转枢纽。'.format('、'.join(chain[1:-1])))
+        chain_lines = ['资金沿「{}」路径逐级传导，'.format(' → '.join(chain)),
+                       '中间环节（{}）兼具收付职能，疑似资金中转枢纽。'.format('、'.join(chain[1:-1]))]
     elif chain and len(chain) == 2:
-        lines.append('最大净流出方与最大净流入方存在直接资金往来（{} → {}），主体间以直接通道为主。'.format(chain[0], chain[1]))
+        chain_lines = ['最大净流出方与最大净流入方存在直接资金往来（{} → {}），主体间以直接通道为主。'.format(chain[0], chain[1])]
     else:
-        lines.append('未发现明显的多级传导链，主体间以直接往来为主。')
-    lines.append('')
+        chain_lines = ['未发现明显的多级传导链，主体间以直接往来为主。']
 
-    # ===== 资金回流提示 =====
-    lines.append('【资金回流提示】')
     if cycles:
-        lines.append('检测到疑似资金回流环（仅列示前 {} 个）：'.format(len(cycles)))
-        for c in cycles:
-            lines.append('  ' + ' → '.join(c) + ' → ' + c[0])
-        lines.append('网络内存在资金循环流动的可能，建议结合业务背景与原始凭证进一步核查。')
+        cycle_lines = ['检测到疑似资金回流环（仅列示前 {} 个）：'.format(len(cycles))]
+        cycle_lines.extend('  ' + ' → '.join(c) + ' → ' + c[0] for c in cycles)
+        cycle_lines.append('网络内存在资金循环流动的可能，建议结合业务背景与原始凭证进一步核查。')
     else:
-        lines.append('未检测到明显的资金回流闭环。')
+        cycle_lines = ['未检测到明显的资金回流闭环。']
+
+    return [
+        ('核心结论', core),
+        ('网络概览', overview),
+        ('资金供给端（主要净流出方）', supply),
+        ('资金归集端（主要净流入方）', collect),
+        ('大额资金通道', channels),
+        ('资金集中度', concentration),
+        ('疑似最终收益方（初步研判，仅供参考）', beneficiary),
+        ('资金传导链', chain_lines),
+        ('资金回流提示', cycle_lines),
+    ]
+
+
+def format_analysis_section(analysis):
+    """把 analyze_flow 的结果组织为文本段落（供 txt 报告）。"""
+    lines = []
+    for title, sts in analysis_sentences(analysis):
+        lines.append('【{}】'.format(title))
+        lines.extend(sts)
+        lines.append('')
     return lines
+
+
+def _esc_html(s):
+    """HTML 转义（报告内容全部来自数据，需转义防错乱）。"""
+    return (s.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+            .replace('"', '&quot;'))
+
+
+def build_report_html(contract, policy_label, tol=0.01, source_file=''):
+    """生成内嵌于 HTML 的资金流水分析报告片段（与 txt 报告同源，样式简洁优雅）。"""
+    audit = contract.get('audit') or []
+    edges = contract.get('edges') or []
+    analysis = analyze_flow(edges, tol=tol)
+    h = []
+
+    # ---- 头部 ----
+    h.append('<div class="rep-kicker">FUND FLOW ANALYSIS</div>')
+    h.append('<h1>资金流水分析报告</h1>')
+    meta = ['生成时间：' + time.strftime('%Y-%m-%d %H:%M:%S')]
+    if source_file:
+        meta.append('数据文件：' + os.path.basename(source_file))
+    meta.append('聚合口径：' + policy_label)
+    meta.append('差异容差：{} 元'.format(tol))
+    h.append('<div class="rep-meta">' + ''.join('<span>{}</span>'.format(_esc_html(m)) for m in meta) + '</div>')
+
+    # ---- 一、数据一致性检查 ----
+    h.append('<div class="rep-section"><h2>一、数据一致性检查</h2>')
+    total_diff = sum(r['diff'] for r in audit)
+    h.append('<p class="rep-stat">共 {} 对节点，其中 {} 处方向记录不一致，差异合计 {:.2f} 元。</p>'.format(
+        len(edges), len(audit), total_diff))
+    if not audit:
+        h.append('<p><span class="rep-pill rep-ok">✓ 未发现不一致记录，双方记账口径基本吻合</span></p>')
+    else:
+        h.append('<p><span class="rep-pill rep-warn">⚠ 发现 {} 处方向记录不一致，详见下表</span></p>'.format(len(audit)))
+        h.append('<table class="rep-table"><thead><tr>'
+                 '<th>用户方</th><th>客户方</th><th>方向</th><th>支出方金额</th>'
+                 '<th>收入方金额</th><th>差异</th><th>占比</th><th>单侧</th></tr></thead><tbody>')
+        for r in audit:
+            h.append('<tr><td>{}</td><td>{}</td><td>{} → {}</td><td>{:.2f}</td><td>{:.2f}</td>'
+                     '<td class="diff">{:.2f}</td><td>{:.1f}%</td><td class="one">{}</td></tr>'.format(
+                         _esc_html(r['a']), _esc_html(r['b']), _esc_html(r['a']), _esc_html(r['b']),
+                         r['spend'], r['recv'], r['diff'], r['ratio'],
+                         '单侧' if r['one_sided'] else ''))
+        h.append('</tbody></table>')
+    h.append('</div>')
+
+    # ---- 二、资金流向参考分析 ----
+    h.append('<div class="rep-section"><h2>二、资金流向参考分析</h2>')
+    h.append('<p class="rep-sub">本部分结论由程序依据流水数据自动生成，属初步研判、仅供参考。</p>')
+    for title, sts in analysis_sentences(analysis):
+        h.append('<h3>{}</h3>'.format(_esc_html(title)))
+        if title == '核心结论':
+            h.append('<div class="rep-card"><ol>')
+            for st in sts:
+                h.append('<li>{}</li>'.format(_esc_html(st.strip())))
+            h.append('</ol></div>')
+        else:
+            h.append('<ul class="rep-list">')
+            for st in sts:
+                h.append('<li>{}</li>'.format(_esc_html(st.strip())))
+            h.append('</ul>')
+    h.append('</div>')
+
+    # ---- 三、口径与局限说明 ----
+    h.append('<div class="rep-section"><h2>三、口径与局限说明</h2>')
+    notes = [
+        '图上金额 = 按所选聚合口径计算；“以支出方为准”时金额=支出方合计，仅当该方向无支出记录时回退使用收入记录（避免丢边）。',
+        '因数据无交易编号，无法区分“同一笔交易的双方记账差异”与“多笔独立交易”，差异部分请结合原始流水人工核查后再下结论。',
+        '本报告第二节的分析结论由程序依据流水数据自动生成，属初步研判、仅供参考，不构成审计结论、鉴定意见或法律意见；请在结合原始凭证与业务背景后审慎使用。',
+        '如需精确配对，建议在透视表中保留 交易ID/流水号/时间 字段。',
+    ]
+    for i, n in enumerate(notes, 1):
+        h.append('<p class="rep-note">{}. {}</p>'.format(i, _esc_html(n)))
+    h.append('</div>')
+
+    # ---- 页脚 ----
+    h.append('<div class="rep-footer">'
+             '<span class="rep-tool">资金流水走向分析工具</span>'
+             '<span class="rep-sep"> · </span>'
+             'Powered by '
+             '<a href="https://github.com/drpasserby" target="_blank" rel="noopener">GitHub@drpasserby(WLXC)</a>'
+             '</div>')
+    return '\n'.join(h)
+
 
 
 def write_analysis_report(path, contract, policy_label, tol=0.01, source_file=''):
@@ -1811,12 +1995,13 @@ def main():
             messagebox.showwarning('数据一致性提示', '\n'.join(lines))
 
         html = generate_html(contract, title='资金流水分析演示图', hide_other=True,
-                             default_mode=html_style, policy_label=POLICY_LABELS[policy])
-        with open('资金流向图.html', 'w', encoding='utf-8') as f:
+                             default_mode=html_style, policy_label=POLICY_LABELS[policy],
+                             source_file=file_path)
+        with open('资金流向图与流水分析报告.html', 'w', encoding='utf-8') as f:
             f.write(html)
         write_analysis_report('资金流水分析报告.txt', contract, POLICY_LABELS[policy], source_file=file_path)
         if sys.stdout is not None:
-            print('已生成 资金流向图.html 与 资金流水分析报告.txt，双击 HTML 即可在浏览器中离线使用。')
+            print('已生成 资金流向图与流水分析报告.html 与 资金流水分析报告.txt，双击 HTML 即可在浏览器中离线使用。')
     except Exception as e:
         messagebox.showerror('程序运行出错', '生成过程中出错了：\n{}'.format(e))
         return
