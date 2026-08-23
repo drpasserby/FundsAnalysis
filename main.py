@@ -1,6 +1,6 @@
 """
 资金流水走向分析工具
-版本：1.3.0
+版本：1.3.1
 作者：wulvxinchen
 """
 
@@ -610,17 +610,8 @@ body.mode-ios #auditTable tbody tr:last-child td { border-bottom:none; }
 body.mode-ios #auditTable td.diff { color:var(--expense); }
 body.mode-ios #auditTable td.oneside { color:#ff9f0a; }
 body.mode-ios .dashline { border-top-color:var(--edge); }
-/* ================= 顶部导航 ================= */
-#topnav { position:sticky; top:0; z-index:60; display:flex; align-items:center; justify-content:space-between;
-  padding:10px 18px; background:var(--glass-bg); -webkit-backdrop-filter:saturate(180%) blur(14px); backdrop-filter:saturate(180%) blur(14px);
-  border-bottom:0.5px solid var(--separator); }
-#navBrand { font-size:13.5px; font-weight:600; color:var(--text); letter-spacing:0.02em; }
-#navTabs { display:flex; gap:3px; background:var(--fill); border-radius:999px; padding:3px; }
-.nav-btn { border:none; background:transparent; color:var(--text-2); font-size:12.5px; padding:6px 16px; border-radius:999px;
-  cursor:pointer; transition:all .18s ease; -webkit-user-select:none; user-select:none; }
-.nav-btn.active { background:var(--card-solid); color:var(--text); font-weight:600; box-shadow:var(--shadow-sm); }
 /* ================= 报告入口按钮 ================= */
-#entryBar { text-align:center; margin:16px 0 2px; }
+#entryBar { text-align:center; padding:20px 0; }
 #reportEntry { border:none; cursor:pointer; background:var(--tint); color:#fff; font-size:14px; font-weight:600;
   padding:11px 30px; border-radius:999px; box-shadow:0 4px 14px rgba(10,132,255,0.25);
   transition:transform .18s ease, box-shadow .18s ease; -webkit-user-select:none; user-select:none; }
@@ -644,6 +635,8 @@ body.mode-ios .dashline { border-top-color:var(--edge); }
 .rep-meta { display:flex; flex-wrap:wrap; gap:8px; margin:16px 0 0; padding:14px 0 0; border-top:0.5px solid var(--separator); }
 .rep-meta span { font-size:12px; color:var(--text-2); background:var(--fill); border:0.5px solid var(--separator);
   padding:4px 13px; border-radius:999px; }
+.rep-src { margin:8px 0 0; font-size:13px; color:var(--text-2); letter-spacing:0.02em; }
+.rep-src-tool { color:var(--text); font-weight:500; }
 .rep-section { margin-top:34px; }
 .rep-sub { color:var(--text-2); font-size:13px; margin:-4px 0 4px; }
 .rep-stat { color:var(--text); margin:4px 0 10px; }
@@ -673,32 +666,23 @@ body.mode-ios .dashline { border-top-color:var(--edge); }
 .rep-footer .rep-sep { opacity:0.5; }
 @media (max-width:720px) {
   #reportDoc { padding:28px 20px; border-radius:12px; margin:12px 10px 40px; }
-  #topnav { padding:8px 12px; }
-  .nav-btn { padding:5px 12px; font-size:12px; }
-  #navBrand { display:none; }
+  #entryBar { padding:16px 0; }
 }
 @media (prefers-reduced-motion: reduce) { * { animation:none !important; transition-duration:0.01ms !important; } }
 
 </style>
 </head>
 <body class="{{BODY_CLASS}}">
-<nav id="topnav">
-  <span id="navBrand">资金流水走向分析工具</span>
-  <span id="navTabs">
-    <button type="button" class="nav-btn active" data-view="graph" aria-label="资金流向图">资金流向图</button>
-    <button type="button" class="nav-btn" data-view="report" aria-label="资金流水分析报告">资金流水分析报告</button>
-  </span>
-</nav>
 <div id="viewGraph">
 <div id="page">
 <h2 id="titleText">资金流水分析演示图</h2>
+<div id="entryBar"><button id="reportEntry" type="button" aria-label="查看资金流水分析报告">查看资金流水分析报告<span class="entryArrow">→</span></button></div>
 <div id="legendClassic"><span style="color:#c0392b;">——净流入</span> <span style="color:#2e8b57;">——净流出</span> <span style="margin-left:14px;border-top:1.5px dashed #999;"> 记录不一致</span></div>
 <div id="legendIos">
   <span><span class="dot" style="background:#ff3b30;"></span>净流入</span>
   <span><span class="dot" style="background:#34c759;"></span>净流出</span>
   <span><span class="dashline"></span>记录不一致</span>
 </div>
-<div id="entryBar"><button id="reportEntry" type="button" aria-label="查看资金流水分析报告">查看资金流水分析报告<span class="entryArrow">→</span></button></div>
 <div id="canvasWrap">
 <canvas id="canvas" role="img" aria-label="资金流向图，点击圆圈查看其交易详情"></canvas>
 <div id="zoomBtns">
@@ -1423,17 +1407,7 @@ function switchView(name) {
         resizeCanvas();
         draw();
     }
-    var btns = document.querySelectorAll('.nav-btn');
-    for (var i = 0; i < btns.length; i++) {
-        btns[i].className = (btns[i].getAttribute('data-view') === name) ? 'nav-btn active' : 'nav-btn';
-    }
     window.scrollTo(0, 0);
-}
-var navBtns = document.querySelectorAll('.nav-btn');
-for (var ni = 0; ni < navBtns.length; ni++) {
-    (function(btn) {
-        btn.addEventListener('click', function() { tap(); switchView(btn.getAttribute('data-view')); });
-    })(navBtns[ni]);
 }
 document.getElementById('reportEntry').addEventListener('click', function() { tap(); switchView('report'); });
 document.getElementById('backToGraph').addEventListener('click', function() { tap(); switchView('graph'); });
@@ -1700,7 +1674,7 @@ def _fmt_pct(ratio):
 
 
 def analysis_sentences(analysis):
-    """生成资金流向参考分析的结论语句（结构化，txt 与 HTML 共用）。
+    """生成资金流向参考分析的结论语句（结构化，供 HTML 报告使用）。
     返回 [(章节标题, [句子...]), ...]；句子为纯文本（已含编号与金额）。
     """
     total = analysis['total']
@@ -1813,15 +1787,6 @@ def analysis_sentences(analysis):
     ]
 
 
-def format_analysis_section(analysis):
-    """把 analyze_flow 的结果组织为文本段落（供 txt 报告）。"""
-    lines = []
-    for title, sts in analysis_sentences(analysis):
-        lines.append('【{}】'.format(title))
-        lines.extend(sts)
-        lines.append('')
-    return lines
-
 
 def _esc_html(s):
     """HTML 转义（报告内容全部来自数据，需转义防错乱）。"""
@@ -1830,7 +1795,7 @@ def _esc_html(s):
 
 
 def build_report_html(contract, policy_label, tol=0.01, source_file=''):
-    """生成内嵌于 HTML 的资金流水分析报告片段（与 txt 报告同源，样式简洁优雅）。"""
+    """生成内嵌于 HTML 的资金流水分析报告片段（样式简洁优雅，内容直接并入输出 HTML）。"""
     audit = contract.get('audit') or []
     edges = contract.get('edges') or []
     analysis = analyze_flow(edges, tol=tol)
@@ -1839,6 +1804,7 @@ def build_report_html(contract, policy_label, tol=0.01, source_file=''):
     # ---- 头部 ----
     h.append('<div class="rep-kicker">FUND FLOW ANALYSIS</div>')
     h.append('<h1>资金流水分析报告</h1>')
+    h.append('<p class="rep-src">本报告使用工具 <span class="rep-src-tool">drpasserby（WLXC）/FundsAnalysis</span> 生成，结果仅供参考</p>')
     meta = ['生成时间：' + time.strftime('%Y-%m-%d %H:%M:%S')]
     if source_file:
         meta.append('数据文件：' + os.path.basename(source_file))
@@ -1907,55 +1873,6 @@ def build_report_html(contract, policy_label, tol=0.01, source_file=''):
 
 
 
-def write_analysis_report(path, contract, policy_label, tol=0.01, source_file=''):
-    """生成合并报告：数据一致性检查 + 资金流向参考分析（初步研判，仅供参考）。"""
-    audit = contract.get('audit') or []
-    edges = contract.get('edges') or []
-    lines = []
-    lines.append('资金流水走向分析工具 — 资金流水分析报告')
-    lines.append('=' * 56)
-    lines.append('生成时间：{}'.format(time.strftime('%Y-%m-%d %H:%M:%S')))
-    if source_file:
-        lines.append('数据文件：{}'.format(os.path.basename(source_file)))
-    lines.append('聚合口径：{}'.format(policy_label))
-    lines.append('差异容差：{} 元'.format(tol))
-    lines.append('')
-
-    lines.append('一、数据一致性检查')
-    lines.append('-' * 56)
-    total_diff = sum(r['diff'] for r in audit)
-    lines.append('统计：共 {} 对节点，其中 {} 处方向记录不一致；差异合计 {:.2f} 元。'
-                 .format(len(edges), len(audit), total_diff))
-    if not audit:
-        lines.append('未发现不一致记录，双方记账口径基本吻合。')
-    else:
-        for i, r in enumerate(audit, 1):
-            tag = '（单侧记录）' if r['one_sided'] else ''
-            lines.append('[{}] {} → {}'.format(i, r['a'], r['b']))
-            lines.append('    支出方记录：{:.2f} 元'.format(r['spend']))
-            lines.append('    收入方记录：{:.2f} 元'.format(r['recv']))
-            lines.append('    差异：{:.2f} 元（{:.1f}%）{}'.format(r['diff'], r['ratio'], tag))
-    lines.append('')
-
-    lines.append('二、资金流向参考分析（初步研判，仅供参考）')
-    lines.append('-' * 56)
-    analysis = analyze_flow(edges, tol=tol)
-    lines.extend(format_analysis_section(analysis))
-    lines.append('')
-
-    lines.append('三、口径与局限说明')
-    lines.append('-' * 56)
-    lines.append('1. 图上金额 = 按所选聚合口径计算；“以支出方为准”时金额=支出方合计，')
-    lines.append('   仅当该方向无支出记录时回退使用收入记录（避免丢边）。')
-    lines.append('2. 因数据无交易编号，无法区分“同一笔交易的双方记账差异”与“多笔独立交易”，')
-    lines.append('   差异部分请结合原始流水人工核查后再下结论。')
-    lines.append('3. 本报告第二节的分析结论由程序依据流水数据自动生成，属初步研判、仅供参考，')
-    lines.append('   不构成审计结论、鉴定意见或法律意见；请在结合原始凭证与业务背景后审慎使用。')
-    lines.append('4. 如需精确配对，建议在透视表中保留 交易ID/流水号/时间 字段。')
-    with open(path, 'w', encoding='utf-8') as f:
-        f.write('\n'.join(lines) + '\n')
-
-
 
 def main():
     """主流程：选择文件与风格 → 读取 → 校验 → 构图 → 生成 HTML。"""
@@ -1990,7 +1907,7 @@ def main():
                 lines.append('{} → {}：支出方 {} / 收入方 {}（差 {}，{:.1f}%）'
                              .format(r['a'], r['b'], r['spend'], r['recv'], r['diff'], r['ratio']))
             if len(audit) > 10:
-                lines.append('……共 {} 处，完整明细与参考分析见 资金流水分析报告.txt（页面底部面板仅列不一致明细）'
+                lines.append('……共 {} 处，完整明细与参考分析见 资金流向图与流水分析报告.html 的报告页'
                              .format(len(audit)))
             messagebox.showwarning('数据一致性提示', '\n'.join(lines))
 
@@ -1999,9 +1916,8 @@ def main():
                              source_file=file_path)
         with open('资金流向图与流水分析报告.html', 'w', encoding='utf-8') as f:
             f.write(html)
-        write_analysis_report('资金流水分析报告.txt', contract, POLICY_LABELS[policy], source_file=file_path)
         if sys.stdout is not None:
-            print('已生成 资金流向图与流水分析报告.html 与 资金流水分析报告.txt，双击 HTML 即可在浏览器中离线使用。')
+            print('已生成 资金流向图与流水分析报告.html，双击即可在浏览器中离线使用。')
     except Exception as e:
         messagebox.showerror('程序运行出错', '生成过程中出错了：\n{}'.format(e))
         return
