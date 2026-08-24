@@ -1,6 +1,6 @@
 """
 资金流水走向分析工具
-版本：1.3.1
+版本：1.3.2
 作者：wulvxinchen
 """
 
@@ -103,15 +103,14 @@ def choose_file_and_style(root):
 
 # ================= 数据校验与清洗 =================
 def validate_and_clean(raw_df):
-    """校验数据格式并清洗：返回 (清洗后的DataFrame, 提示信息列表)。"""
+    """校验数据格式并清洗：返回 (清洗后的DataFrame, 提示信息列表)。
+    列数不足时抛 ValueError（由调用方以弹窗呈现，避免打包后错误信息不可见）。"""
     messages = []
 
     if raw_df.shape[1] < 4:
-        messagebox.showerror(
-            '数据格式错误',
+        raise ValueError(
             '数据列数不足：当前共 {} 列，至少需要 4 列。\n'
             '请确认数据格式为：用户方 | 支出/收入 | 客户方 | 金额'.format(raw_df.shape[1]))
-        sys.exit(1)
 
     # 表头软校验（仅提示，不阻断）：列位始终按默认顺序读取，不依赖表头文字。
     # 若表头与预设不一致，仍按 第 1 列=用户方、第 2 列=支出/收入、第 3 列=客户方、第 4 列=金额 读取。
@@ -1893,7 +1892,8 @@ def main():
             messagebox.showwarning('数据校验提示', '\n'.join(data_messages))
 
         if df.empty:
-            sys.exit('没有可用的有效数据，程序退出。')
+            messagebox.showwarning('数据校验提示', '没有可用的有效数据，程序退出。')
+            return
 
         G = build_graphs(df, policy=policy)
         contract = build_contract(G)
