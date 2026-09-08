@@ -1,10 +1,15 @@
 """
 生成随机流水数据
-版本：1.0.0
+版本：2.0.0
 ------------------------------------------------------------------------------------------------------------------------
-生成随机100条交易数据并保存为 Excel 文件
+生成随机交易数据并保存为 Excel 文件
 格式为：
 用户方 | 支出/收入 | 客户方 | 金额（元）
+
+数据特点：
+1. 每笔交易成对生成：A 支出 B X 元 与 B 收入 A X 元 一一对应（同一笔资金分别从双方视角记录）；
+2. 金额不一定是整数，可为小数，范围 0.01 ~ 20000 元（保留两位小数）；
+3. 默认生成 100 笔交易，即 200 条流水记录（每笔两行）。
 """
 
 
@@ -27,21 +32,23 @@ people = list(people)
 
 
 records = []
-for _ in range(200):
+for _ in range(100):  # 100 笔交易，每笔两行 → 200 条流水记录
     a = random.choice(people)
     c = random.choice(people)
 
     while c == a:
         c = random.choice(people)
 
+    # 金额可为小数，范围 0.01 ~ 20000，保留两位小数
+    amount = round(random.uniform(0.01, 20000), 2)
 
-    direction = random.choice(['支出', '收入'])
-    amount = random.randint(100, 20000)  # 随机金额 100~20000
-
-    records.append([a, direction, c, amount])
+    # 同一笔资金：A 支出 B 与 B 收入 A 金额一致、双方对应
+    records.append([a, '支出', c, amount])
+    records.append([c, '收入', a, amount])
 
 
 df = pd.DataFrame(records, columns=['用户方', '支出/收入', '客户方', '金额（元）'])
 df.to_excel('流水透视.xlsx', index=False)
 
-print("已生成 流水透视.xlsx，包含 100 条交易记录，共 {} 个不同人员。".format(len(people)))
+print('已生成 流水透视.xlsx：{} 笔交易，共 {} 条流水记录（每笔含支出/收入两条，金额对应一致），{} 个不同人员。'.format(
+    len(records) // 2, len(records), len(people)))
