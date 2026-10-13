@@ -1,0 +1,1358 @@
+# -*- coding: utf-8 -*-
+"""资金流向图与报告渲染（功能 D 的输出层）。
+
+由 1.3.2 版 main.py 原样迁移：内嵌 HTML 模板（方案 A：继续内嵌）、
+generate_html / analysis_sentences / build_report_html 等。
+"""
+import json
+import os
+import re
+import time
+
+from tools.flow.analyze import analyze_flow
+
+# ================= HTML 输出（自包含交互式查看器） =================
+# 模板内嵌于下方 TEMPLATE_HTML 常量，占位符 {{TOKEN}} 由 generate_html 单遍替换。
+# 输出仍是自包含单文件 HTML；不再依赖外部 template.html，避免文件缺失导致无法运行。
+TEMPLATE_HTML = '''<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>{{SAFE_TITLE}}</title>
+<style>
+:root {
+  color-scheme: light dark;
+  --bg:#f2f2f7; --card-solid:#ffffff; --glass-bg:rgba(255,255,255,0.78);
+  --text:#1c1c1e; --text-2:#8e8e93; --separator:rgba(60,60,67,0.29); --fill:rgba(120,120,128,0.12);
+  --tint:#007aff; --income:#34c759; --expense:#ff3b30;
+  --shadow-sm:0 1px 2px rgba(0,0,0,0.04), 0 2px 8px rgba(0,0,0,0.05);
+  --shadow-md:0 2px 6px rgba(0,0,0,0.06), 0 14px 36px rgba(0,0,0,0.10);
+  --canvas-bg:#ffffff; --edge:#c7c7cc;
+  --node-fill:rgba(10,132,255,0.10); --node-border:#007aff; --node-text:#1c1c1e;
+  --active-fill:rgba(255,149,0,0.30); --active-border:#ff9500;
+  --conn-fill:rgba(52,199,89,0.20); --conn-border:#34c759;
+  --dim-fill:rgba(120,120,128,0.14); --dim-border:#aeaeb2;
+  --tooltip-bg:rgba(28,28,30,0.88); --tooltip-text:#ffffff;
+  --label-bg:rgba(255,255,255,0.92); --watermark:rgba(0,0,0,0.05);
+  --spring:cubic-bezier(0.32,0.72,0,1);
+}
+@media (prefers-color-scheme: dark) {
+  :root { --bg:#000000; --card-solid:#1c1c1e; --glass-bg:rgba(30,30,32,0.78); --text:#ffffff; --text-2:#8e8e93;
+    --separator:rgba(84,84,88,0.6); --fill:rgba(120,120,128,0.24); --tint:#0a84ff;
+    --shadow-sm:0 1px 2px rgba(0,0,0,0.4), 0 2px 8px rgba(0,0,0,0.5);
+    --shadow-md:0 2px 6px rgba(0,0,0,0.5), 0 14px 36px rgba(0,0,0,0.6);
+    --canvas-bg:#0c0c0e; --edge:#48484a;
+    --node-fill:rgba(10,132,255,0.22); --node-border:#0a84ff; --node-text:#ffffff;
+    --active-fill:rgba(255,149,0,0.35); --active-border:#ff9f0a;
+    --conn-fill:rgba(48,209,88,0.22); --conn-border:#30d158;
+    --dim-fill:rgba(120,120,128,0.26); --dim-border:#636366;
+    --tooltip-bg:rgba(44,44,46,0.94); --tooltip-text:#ffffff; --label-bg:rgba(28,28,30,0.88); --watermark:rgba(255,255,255,0.07);
+  }
+}
+/* ================= 经典界面（默认样式，对应 1.1.7） ================= */
+html, body { margin:0; padding:0; }
+body { display:flex; flex-direction:column; align-items:center;
+       font-family:'Microsoft YaHei','SimHei',sans-serif; background:#fafafa; }
+#page { width:100%; display:flex; flex-direction:column; align-items:center; }
+#titleText { margin:8px 0 2px; font-size:20px; color:#333; }
+#legendClassic { font-size:13px; color:#555; margin:12px 0 8px; }
+#legendIos { display:none; }
+#canvasWrap { position:relative; }
+#canvas { border:1px solid #ccc; background:#fff; cursor:grab; }
+#zoomBtns { position:absolute; right:10px; bottom:10px; display:flex; flex-direction:column; gap:6px; }
+#zoomBtns button { width:36px; height:36px; font-size:24px; line-height:1; cursor:pointer;
+                   border:1px solid #bbb; border-radius:4px; background:#fff; color:#333;
+                   -webkit-user-select:none; user-select:none; padding:0; }
+#zoomBtns button:hover { background:#f0f0f0; }
+#zoomBtns button:active { background:#e0e0e0; }
+#settingsPanel { display:none; position:absolute; top:0; left:0; right:0; bottom:0;
+                 background:rgba(0,0,0,0.25); z-index:10; }
+#settingsPanel.show { display:block; }
+#settingsBox { position:absolute; top:50%; left:50%; transform:translate(-50%,-50%);
+               background:#fff; border:1px solid #ccc; border-radius:6px; padding:16px 20px;
+               font-size:14px; color:#333; box-shadow:0 4px 16px rgba(0,0,0,0.2); }
+#grabber { display:none; }
+#settingsTitle { font-size:16px; font-weight:bold; margin-bottom:8px; }
+#settingsBox .row { display:block; margin:8px 0; cursor:pointer; }
+#settingsBox #titleRow { margin:8px 0; cursor:default; }
+#titleRow .rowLabel::after { content:'：'; }
+#settingsBox .switch { display:inline-block; vertical-align:middle; }
+#settingsBox .switch input { position:static; opacity:1; width:auto; height:auto; margin:0; }
+#settingsBox .switch .track, #settingsBox .switch .thumb { display:none; }
+#settingsClose { margin-top:12px; padding:4px 16px; cursor:pointer; }
+.t-ios { display:none; }
+.t-classic { display:inline; }
+.seg { display:inline-flex; vertical-align:middle; }
+.seg-btn { border:1px solid #bbb; background:#fff; color:#333; padding:2px 12px; cursor:pointer; font-size:13px; }
+.seg-btn.active { background:#007aff; color:#fff; border-color:#007aff; }
+#detailPanel { display:none; margin:16px auto 40px; width:80%; max-width:1000px;
+               min-width:400px; font-size:14px; color:#333; }
+#detailTitle { text-align:center; font-size:17px; margin:0 0 10px; }
+#detailTable { border-collapse:collapse; width:100%; background:#fff; }
+#detailTable th, #detailTable td { border:1px solid #dcdcdc; padding:7px 14px; text-align:center; }
+#detailTable th { background:#f0f4f8; color:#333; font-weight:bold; cursor:pointer; -webkit-user-select:none; user-select:none; }
+#detailTable th .sortArrow { font-size:11px; margin-left:4px; color:#888; }
+#detailTable th:hover { background:#e6edf4; }
+#detailTable tbody tr:nth-child(even) { background:#fafafa; }
+#detailTable tbody tr:hover { background:#f0f7ff; }
+#detailTable td.empty { color:#999; }
+#detailTable th.chk, #detailTable td.chk { width:44px; }
+#detailTable input.tx-chk, #detailTable #chkAll { width:16px; height:16px; cursor:pointer; vertical-align:middle; margin:0; }
+/* ================= 数据一致性面板（经典） ================= */
+#auditPanel { display:none; margin:16px auto 40px; width:80%; max-width:1000px;
+               min-width:400px; font-size:14px; color:#333; }
+#auditTitle { text-align:center; font-size:17px; margin:0 0 4px; }
+#auditPolicy { text-align:center; font-size:13px; color:#666; margin:0 0 10px; }
+#auditTable { border-collapse:collapse; width:100%; background:#fff; }
+#auditTable th, #auditTable td { border:1px solid #dcdcdc; padding:6px 12px; text-align:center; }
+#auditTable th { background:#f0f4f8; color:#333; font-weight:bold; }
+#auditTable tbody tr:nth-child(even) { background:#fafafa; }
+#auditTable td.diff { color:#c0392b; font-weight:bold; }
+#auditTable td.oneside { color:#e67e22; }
+.dashline { display:inline-block; width:14px; border-top:1.5px dashed #999; margin-right:7px; vertical-align:middle; }
+/* ================= iOS 界面覆盖（body.mode-ios） ================= */
+body.mode-ios { background:var(--bg); color:var(--text); -webkit-font-smoothing:antialiased;
+  -webkit-tap-highlight-color:transparent;
+  font-family:-apple-system,BlinkMacSystemFont,"SF Pro Text","SF Pro Display","Helvetica Neue","PingFang SC","Hiragino Sans GB","Microsoft YaHei","Microsoft YaHei UI",sans-serif;
+  min-height:100vh; padding:16px;
+  padding:max(16px,env(safe-area-inset-top)) max(16px,env(safe-area-inset-right)) max(28px,env(safe-area-inset-bottom)) max(16px,env(safe-area-inset-left)); }
+body.mode-ios #page { animation:pageIn .5s var(--spring) both; }
+@keyframes pageIn { from { opacity:0; transform:translateY(8px); } to { opacity:1; transform:none; } }
+body.mode-ios #titleText { font-size:32px; font-size:clamp(26px,4.5vw,34px); font-weight:700;
+  letter-spacing:-0.022em; line-height:1.15; margin:10px 0 0; color:var(--text); }
+body.mode-ios #legendClassic { display:none; }
+body.mode-ios #legendIos { display:flex; gap:22px; justify-content:center; align-items:center;
+  font-size:13px; color:var(--text-2); margin:10px 0 22px; letter-spacing:0.01em; }
+#legendIos .dot { width:8px; height:8px; border-radius:50%; display:inline-block; margin-right:7px; }
+body.mode-ios #canvasWrap { display:inline-block; max-width:100%; border-radius:24px; overflow:hidden;
+  background:var(--canvas-bg); box-shadow:var(--shadow-md); }
+body.mode-ios #canvas { border:none; display:block; background:transparent; touch-action:none; }
+body.mode-ios #zoomBtns { right:14px; bottom:14px; gap:12px; }
+body.mode-ios #zoomBtns button { width:46px; height:46px; border-radius:50%; border:0.5px solid var(--separator);
+  background:var(--glass-bg); -webkit-backdrop-filter:saturate(180%) blur(20px); backdrop-filter:saturate(180%) blur(20px);
+  color:var(--tint); font-size:22px; box-shadow:var(--shadow-sm); touch-action:manipulation;
+  transition:transform .18s var(--spring), opacity .18s ease, background .18s ease; }
+body.mode-ios #zoomBtns button:hover { background:var(--fill); }
+body.mode-ios #zoomBtns button:active { transform:scale(0.90); opacity:0.72; }
+body.mode-ios #zoomBtns button:focus-visible, body.mode-ios #settingsClose:focus-visible, body.mode-ios #titleInput:focus-visible { outline:2px solid var(--tint); outline-offset:2px; }
+body.mode-ios #settingsPanel { display:flex; position:fixed; left:0; top:0; right:0; bottom:0; z-index:50; background:rgba(0,0,0,0.4);
+  align-items:flex-end; justify-content:center; visibility:hidden; opacity:0; pointer-events:none;
+  transition:opacity .3s ease, visibility .3s ease; }
+body.mode-ios #settingsPanel.show { visibility:visible; opacity:1; pointer-events:auto; }
+body.mode-ios #settingsBox { position:static; width:100%; max-width:520px; background:var(--glass-bg);
+  -webkit-backdrop-filter:saturate(180%) blur(40px); backdrop-filter:saturate(180%) blur(40px);
+  border-radius:24px 24px 0 0; border:0; border-top:0.5px solid var(--separator);
+  box-shadow:0 -12px 40px rgba(0,0,0,0.25); color:var(--text); font-size:17px;
+  padding:8px 24px 28px; padding:8px 24px calc(28px + env(safe-area-inset-bottom));
+  transform:translateY(105%); transition:transform .5s var(--spring); }
+body.mode-ios #settingsPanel.show #settingsBox { transform:translateY(0); }
+body.mode-ios #grabber { display:block; width:36px; height:5px; border-radius:3px; background:var(--fill); margin:8px auto 12px; }
+body.mode-ios #settingsTitle { font-size:20px; font-weight:700; text-align:center; letter-spacing:-0.01em; margin:4px 0 6px; color:var(--text); }
+body.mode-ios #settingsBox .row { display:flex; align-items:center; justify-content:space-between; min-height:50px; gap:16px; padding:2px; margin:0; font-size:17px; color:var(--text); }
+body.mode-ios #settingsBox .row + .row { border-top:0.5px solid var(--separator); }
+body.mode-ios #settingsBox .row .rowLabel { order:-1; -webkit-user-select:none; user-select:none; }
+body.mode-ios #titleRow .rowLabel::after { content:none; }
+body.mode-ios #settingsBox .switch { position:relative; display:inline-block; width:51px; height:31px; flex:none; }
+body.mode-ios #settingsBox .switch input { position:absolute; opacity:0; width:100%; height:100%; margin:0; cursor:pointer; z-index:2; }
+body.mode-ios #settingsBox .switch .track { display:block; position:absolute; left:0; top:0; right:0; bottom:0; border-radius:16px; background:rgba(120,120,128,0.32); transition:background .25s ease; }
+body.mode-ios #settingsBox .switch .thumb { display:block; position:absolute; top:2px; left:2px; width:27px; height:27px; border-radius:50%; background:#fff;
+  box-shadow:0 2px 5px rgba(0,0,0,0.3), 0 0 1px rgba(0,0,0,0.1); transition:transform .3s var(--spring); }
+body.mode-ios #settingsBox .switch input:checked + .track { background:var(--income); }
+body.mode-ios #settingsBox .switch input:checked + .track + .thumb { transform:translateX(20px); }
+body.mode-ios #titleInput { flex:1; max-width:260px; min-width:0; border:none; outline:none; background:var(--fill); color:var(--text);
+  border-radius:10px; padding:8px 12px; font-size:17px; text-align:right; }
+body.mode-ios #titleInput:focus { box-shadow:0 0 0 3px rgba(10,132,255,0.28); }
+body.mode-ios #settingsClose { width:100%; margin:20px 0 4px; padding:14px; border:none; border-radius:14px; background:var(--tint); color:#fff;
+  font-size:17px; font-weight:600; transition:opacity .18s ease, transform .18s var(--spring); }
+body.mode-ios #settingsClose:active { opacity:0.85; transform:scale(0.98); }
+body.mode-ios .t-classic { display:none; }
+body.mode-ios .t-ios { display:inline; }
+body.mode-ios .seg { background:var(--fill); border-radius:9px; padding:2px; display:inline-flex; }
+body.mode-ios .seg-btn { border:none; background:transparent; color:var(--text-2); padding:5px 18px; font-size:13px; font-weight:500; border-radius:7px; }
+body.mode-ios .seg-btn.active { background:var(--card-solid); color:var(--text); box-shadow:var(--shadow-sm); }
+body.mode-ios #detailPanel { margin:24px auto 48px; width:80%; max-width:100%; font-size:15px; color:var(--text); }
+body.mode-ios #detailTitle { font-size:24px; font-weight:700; letter-spacing:-0.02em; margin:0 0 16px; color:var(--text); }
+body.mode-ios #detailTable { border-collapse:separate; border-spacing:0; background:var(--card-solid);
+  border-radius:18px; overflow:hidden; box-shadow:var(--shadow-sm); }
+body.mode-ios #detailTable th, body.mode-ios #detailTable td { border:0; border-bottom:0.5px solid var(--separator); }
+body.mode-ios #detailTable th { background:transparent; color:var(--text-2); font-size:13px; font-weight:600; letter-spacing:0.02em; padding:14px 16px 8px; cursor:pointer; -webkit-user-select:none; user-select:none; }
+body.mode-ios #detailTable th:hover { background:var(--fill); }
+body.mode-ios #detailTable th .sortArrow { color:var(--text-2); }
+body.mode-ios #detailTable td { padding:13px 16px; color:var(--text); }
+body.mode-ios #detailTable tbody tr:last-child td { border-bottom:none; }
+body.mode-ios #detailTable tbody tr:nth-child(even) { background:transparent; }
+body.mode-ios #detailTable td.empty { color:var(--text-2); }
+body.mode-ios #auditPanel { margin:24px auto 48px; width:80%; max-width:100%; font-size:15px; color:var(--text); }
+body.mode-ios #auditTitle { font-size:24px; font-weight:700; letter-spacing:-0.02em; margin:0 0 4px; color:var(--text); }
+body.mode-ios #auditPolicy { color:var(--text-2); font-size:13px; margin:0 0 16px; }
+body.mode-ios #auditTable { border-collapse:separate; border-spacing:0; background:var(--card-solid);
+  border-radius:18px; overflow:hidden; box-shadow:var(--shadow-sm); }
+body.mode-ios #auditTable th, body.mode-ios #auditTable td { border:0; border-bottom:0.5px solid var(--separator); }
+body.mode-ios #auditTable th { background:transparent; color:var(--text-2); font-size:13px; font-weight:600; padding:14px 16px 8px; }
+body.mode-ios #auditTable td { padding:13px 16px; color:var(--text); }
+body.mode-ios #auditTable tbody tr:last-child td { border-bottom:none; }
+body.mode-ios #auditTable td.diff { color:var(--expense); }
+body.mode-ios #auditTable td.oneside { color:#ff9f0a; }
+body.mode-ios .dashline { border-top-color:var(--edge); }
+/* ================= 报告入口按钮 ================= */
+#entryBar { text-align:center; padding:20px 0; }
+#reportEntry { border:none; cursor:pointer; background:var(--tint); color:#fff; font-size:14px; font-weight:600;
+  padding:11px 30px; border-radius:999px; box-shadow:0 4px 14px rgba(10,132,255,0.25);
+  transition:transform .18s ease, box-shadow .18s ease; -webkit-user-select:none; user-select:none; }
+#reportEntry:hover { transform:translateY(-1px); box-shadow:0 6px 18px rgba(10,132,255,0.32); }
+#reportEntry:active { transform:translateY(0); }
+#reportEntry .entryArrow { margin-left:8px; }
+/* ================= 资金流水分析报告（内置文档） ================= */
+#viewReport { display:none; }
+#backBar { max-width:880px; margin:22px auto 0; padding:0 12px; }
+#backToGraph { border:1px solid var(--separator); background:var(--card-solid); color:var(--text); font-size:13px;
+  padding:8px 18px; border-radius:999px; cursor:pointer; transition:all .18s ease; }
+#backToGraph:hover { border-color:var(--tint); color:var(--tint); }
+#reportDoc { max-width:880px; margin:16px auto 56px; padding:44px 52px; background:var(--card-solid);
+  border:0.5px solid var(--separator); border-radius:16px; box-shadow:var(--shadow-md);
+  color:var(--text); font-size:15px; line-height:1.85; }
+#reportDoc h1 { font-size:25px; font-weight:700; letter-spacing:-0.01em; margin:0 0 4px; color:var(--text); }
+#reportDoc h2 { font-size:18px; font-weight:700; margin:0 0 14px; color:var(--text); display:flex; align-items:center; gap:10px; }
+#reportDoc h2::before { content:''; width:4px; height:17px; border-radius:2px; background:var(--tint); flex:none; }
+#reportDoc h3 { font-size:14.5px; font-weight:600; color:var(--text); margin:20px 0 8px; }
+.rep-kicker { font-size:11.5px; letter-spacing:0.22em; color:var(--tint); font-weight:600; margin:0 0 6px; text-transform:uppercase; }
+.rep-meta { display:flex; flex-wrap:wrap; gap:8px; margin:16px 0 0; padding:14px 0 0; border-top:0.5px solid var(--separator); }
+.rep-meta span { font-size:12px; color:var(--text-2); background:var(--fill); border:0.5px solid var(--separator);
+  padding:4px 13px; border-radius:999px; }
+.rep-src { margin:8px 0 0; font-size:13px; color:var(--text-2); letter-spacing:0.02em; }
+.rep-src-tool { color:var(--text); font-weight:500; }
+.rep-section { margin-top:34px; }
+.rep-sub { color:var(--text-2); font-size:13px; margin:-4px 0 4px; }
+.rep-stat { color:var(--text); margin:4px 0 10px; }
+.rep-pill { display:inline-block; font-size:12.5px; padding:4px 14px; border-radius:999px; border:0.5px solid var(--separator); background:var(--fill); }
+.rep-ok { color:var(--income); }
+.rep-warn { color:#d97706; }
+.rep-card { background:var(--fill); border:0.5px solid var(--separator); border-left:3px solid var(--tint); border-radius:10px; padding:14px 22px; margin:12px 0 4px; }
+.rep-card ol { margin:0; padding:0; list-style:none; counter-reset:core; }
+.rep-card li { counter-increment:core; position:relative; padding:7px 0 7px 36px; }
+.rep-card li::before { content:counter(core); position:absolute; left:0; top:10px; width:22px; height:22px; border-radius:50%;
+  background:var(--tint); color:#fff; font-size:12px; font-weight:600; display:flex; align-items:center; justify-content:center; }
+.rep-list { list-style:none; margin:6px 0 2px; padding:0; }
+.rep-list li { padding:5px 0 5px 24px; position:relative; color:var(--text); }
+.rep-list li::before { content:''; position:absolute; left:5px; top:15px; width:6px; height:6px; border-radius:50%; background:var(--text-2); opacity:0.55; }
+.rep-note { color:var(--text-2); font-size:13px; margin:9px 0; padding-left:20px; position:relative; }
+.rep-note::before { content:''; position:absolute; left:6px; top:9px; width:5px; height:5px; border-radius:50%; background:var(--tint); opacity:0.6; }
+.rep-table { width:100%; border-collapse:collapse; margin:12px 0 2px; font-size:13px; }
+.rep-table th { background:var(--fill); color:var(--text-2); font-weight:600; text-align:left; padding:9px 12px; border-bottom:0.5px solid var(--separator); }
+.rep-table td { padding:8px 12px; border-bottom:0.5px solid var(--separator); color:var(--text); }
+.rep-table tr:last-child td { border-bottom:none; }
+.rep-table td.diff { color:var(--expense); font-weight:600; }
+.rep-table td.one { color:#d97706; }
+.rep-footer { margin-top:38px; padding-top:18px; border-top:0.5px solid var(--separator); text-align:center; color:var(--text-2); font-size:12.5px; letter-spacing:0.02em; }
+.rep-footer a { color:var(--text-2); text-decoration:none; border-bottom:1px solid var(--separator); transition:color .18s ease, border-color .18s ease; }
+.rep-footer a:hover { color:var(--tint); border-color:var(--tint); }
+.rep-footer .rep-tool { font-weight:600; color:var(--text); }
+.rep-footer .rep-sep { opacity:0.5; }
+@media (max-width:720px) {
+  #reportDoc { padding:28px 20px; border-radius:12px; margin:12px 10px 40px; }
+  #entryBar { padding:16px 0; }
+}
+@media (prefers-reduced-motion: reduce) { * { animation:none !important; transition-duration:0.01ms !important; } }
+
+</style>
+</head>
+<body class="{{BODY_CLASS}}">
+<div id="viewGraph">
+<div id="page">
+<h2 id="titleText">资金流水分析演示图</h2>
+<div id="entryBar"><button id="reportEntry" type="button" aria-label="查看资金流水分析报告">查看资金流水分析报告<span class="entryArrow">→</span></button></div>
+<div id="legendClassic"><span style="color:#c0392b;">——净流入</span> <span style="color:#2e8b57;">——净流出</span> <span style="margin-left:14px;border-top:1.5px dashed #999;"> 记录不一致</span></div>
+<div id="legendIos">
+  <span><span class="dot" style="background:#ff3b30;"></span>净流入</span>
+  <span><span class="dot" style="background:#34c759;"></span>净流出</span>
+  <span><span class="dashline"></span>记录不一致</span>
+</div>
+<div id="canvasWrap">
+<canvas id="canvas" role="img" aria-label="资金流向图，点击圆圈查看其交易详情"></canvas>
+<div id="zoomBtns">
+  <button id="refreshBtn" type="button" title="刷新视图" aria-label="刷新视图">↻</button>
+  <button id="settingsBtn" type="button" title="设置" aria-label="设置">⚙</button>
+  <button id="zoomIn" type="button" title="放大" aria-label="放大">+</button>
+  <button id="zoomOut" type="button" title="缩小" aria-label="缩小">−</button>
+</div>
+<div id="settingsPanel" role="dialog" aria-modal="true" aria-label="设置" aria-hidden="true">
+  <div id="settingsBox">
+    <div id="grabber"></div>
+    <div id="settingsTitle">设置</div>
+    <div class="row" id="uiStyleRow" role="radiogroup" aria-label="界面风格">
+      <span class="rowLabel">界面风格</span>
+      <span class="seg">
+        <button type="button" class="{{SEG_CLASSIC}}" data-mode="classic" aria-label="经典">经典</button>
+        <button type="button" class="{{SEG_IOS}}" data-mode="ios" aria-label="iOS">iOS</button>
+      </span>
+    </div>
+    <label class="row"><span class="switch"><input type="checkbox" id="cbAmount"{{AMT_CHECKED}}><span class="track"></span><span class="thumb"></span></span><span class="rowLabel">显示金额</span></label>
+    <label class="row" title="开启后点击某个圆圈，只显示该用户及其直接关联的圆圈和连线"><span class="switch"><input type="checkbox" id="cbHideOther"{{HIDE_CHECKED}}><span class="track"></span><span class="thumb"></span></span><span class="rowLabel">隐藏其他</span></label>
+    <div class="row" id="titleRow"><span class="rowLabel">标题</span><input type="text" id="titleInput" value="资金流水分析演示图" aria-label="标题"></div>
+    <div class="row" id="policyRow"><span class="rowLabel">聚合口径</span><span class="rowVal">{{POLICY_LABEL}}</span></div>
+    <div class="row" id="auditRow"><span class="rowLabel">数据一致性</span><span class="rowVal">{{AUDIT_LINE}}</span></div>
+    <button id="settingsClose" type="button" aria-label="完成并关闭"><span class="t-classic">关闭</span><span class="t-ios">完成</span></button>
+  </div>
+</div>
+</div>
+<div id="detailPanel">
+  <h3 id="detailTitle">用户与其他人员的交易详情</h3>
+  <table id="detailTable">
+    <thead><tr>
+      <th id="thChk" class="chk" aria-label="全选/全不选"><input type="checkbox" id="chkAll" checked></th>
+      <th id="thType" role="button" tabindex="0" aria-sort="none">交易类型 <span class="sortArrow" id="arrowType"></span></th>
+      <th id="thOther" role="button" tabindex="0" aria-sort="none">客户方 <span class="sortArrow" id="arrowOther"></span></th>
+      <th id="thAmount" role="button" tabindex="0" aria-sort="none">金额 <span class="sortArrow" id="arrowAmount"></span></th>
+    </tr></thead>
+    <tbody id="detailBody"></tbody>
+  </table>
+</div>
+<div id="auditPanel">
+  <h3 id="auditTitle">数据一致性检查</h3>
+  <div id="auditPolicy">聚合口径：{{POLICY_LABEL}}　差异容差：0.01 元{{AUDIT_CAP}}</div>
+  <table id="auditTable">
+    <thead><tr>
+      <th>用户方</th><th>客户方</th><th>方向</th><th>支出方金额</th><th>收入方金额</th><th>差异</th><th>占比</th><th>单侧</th>
+    </tr></thead>
+    <tbody id="auditBody"></tbody>
+  </table>
+</div>
+</div>
+</div>
+<div id="viewReport">
+  <div id="backBar"><button id="backToGraph" type="button" aria-label="返回资金流向图">← 返回资金流向图</button></div>
+  <div id="reportDoc">{{REPORT_HTML}}</div>
+</div>
+<script>
+var nodes = {{NODES_JSON}};
+var edges = {{EDGES_JSON}};
+var auditRows = {{AUDIT_JSON}};
+var PADDING = 80;
+var LABEL_MAX_NODES = 500;  // 主体数超过此值时只画选中主体的关联名字（大图逐个画名字会糊成一片且卡顿）
+var radiusScale = 1;  // 节点半径随画布最小边缩放，防止不同窗口尺寸下圆圈互相遮挡
+var scale = 1, panX = 0, panY = 0;
+var activeNode = null, hoverNode = null;
+var sortKey = 'amount', sortDir = -1;  // 交易详情表排序状态：默认按金额降序
+var uncheckedKeys = Object.create(null);  // 被取消勾选的交易（默认全选）
+var detailRows = [];                       // 当前明细行（含勾选键）
+var lastDetailSig = '';                    // 明细表重建签名：活动节点+排序
+var showAmount = {{SHOW_JS}};
+var hideOthers = {{HIDE_JS}};
+/* 单边视图：每对用户一条线（source→target 为 amount，反向为 back），默认黑色 */
+/* 点击某用户后，连线按该用户视角的净流向着色：净流出=绿色，净流入=红色 */
+var canvas = document.getElementById('canvas');
+var ctx = canvas.getContext('2d');
+var W, H;
+var mode = '{{MODE_JS}}';  // 'ios' | 'classic'
+
+var nodeIndex = Object.create(null);
+for (var k = 0; k < nodes.length; k++) { nodeIndex[nodes[k].id] = nodes[k]; }
+
+/* 从 CSS 读取 iOS 主题色；经典模式使用固定色板 CLASSIC */
+function cssVar(name, fallback) {
+    var v = '';
+    try { v = getComputedStyle(document.documentElement).getPropertyValue(name); } catch (e) { v = ''; }
+    v = String(v).trim();
+    return (v === '') ? fallback : v;
+}
+function readColors() {
+    return {
+        income: cssVar('--income', '#34c759'),
+        expense: cssVar('--expense', '#ff3b30'),
+        tint: cssVar('--tint', '#007aff'),
+        edge: cssVar('--edge', '#c7c7cc'),
+        nodeFill: cssVar('--node-fill', 'rgba(10,132,255,0.10)'),
+        nodeBorder: cssVar('--node-border', '#007aff'),
+        nodeText: cssVar('--node-text', '#1c1c1e'),
+        activeFill: cssVar('--active-fill', 'rgba(255,149,0,0.30)'),
+        activeBorder: cssVar('--active-border', '#ff9500'),
+        connFill: cssVar('--conn-fill', 'rgba(52,199,89,0.20)'),
+        connBorder: cssVar('--conn-border', '#34c759'),
+        dimFill: cssVar('--dim-fill', 'rgba(120,120,128,0.14)'),
+        dimBorder: cssVar('--dim-border', '#aeaeb2'),
+        tooltipBg: cssVar('--tooltip-bg', 'rgba(28,28,30,0.88)'),
+        tooltipText: cssVar('--tooltip-text', '#ffffff'),
+        labelBg: cssVar('--label-bg', 'rgba(255,255,255,0.92)'),
+        watermark: cssVar('--watermark', 'rgba(0,0,0,0.05)'),
+        canvasBg: cssVar('--canvas-bg', '#ffffff'),
+        bwNormal: 1.4, bwActive: 3, bwConn: 2, bwDim: 0.6
+    };
+}
+var CLASSIC = {
+    income: '#2e8b57', expense: '#c0392b', edge: '#888',
+    nodeFill: '#dbe9fb', nodeBorder: '#333', nodeText: '#000',
+    activeFill: '#f39c12', activeBorder: '#c0392b',
+    connFill: '#a9dfbf', connBorder: '#2e8b57',
+    dimFill: '#e5e5e5', dimBorder: '#999',
+    tooltipBg: 'rgba(255,255,255,0.95)', tooltipText: '#333',
+    labelBg: '#fff', watermark: '#ddd', canvasBg: '#fff',
+    bwNormal: 0.8, bwActive: 3, bwConn: 2, bwDim: 0.5
+};
+var C = CLASSIC;
+
+function applyMode(newMode) {
+    mode = newMode;
+    document.body.className = (mode === 'ios') ? 'mode-ios' : 'mode-classic';
+    C = (mode === 'ios') ? readColors() : CLASSIC;
+    var segs = document.querySelectorAll('.seg-btn');
+    for (var i = 0; i < segs.length; i++) {
+        segs[i].className = (segs[i].getAttribute('data-mode') === mode) ? 'seg-btn active' : 'seg-btn';
+    }
+    var dp = document.getElementById('detailPanel');
+    if (mode === 'ios' && W) { dp.style.width = W + 'px'; dp.style.maxWidth = '100%'; }
+    else { dp.style.width = ''; dp.style.maxWidth = ''; }
+    draw();
+}
+(function() {
+    if (!window.matchMedia) { return; }
+    var mq = window.matchMedia('(prefers-color-scheme: dark)');
+    var on = function() { if (mode === 'ios') { C = readColors(); draw(); } };
+    if (mq.addEventListener) { mq.addEventListener('change', on); }
+    else if (mq.addListener) { mq.addListener(on); }
+})();
+/* 轻触反馈模拟（支持 vibrate 的浏览器/设备） */
+function tap() { try { if (navigator.vibrate) { navigator.vibrate(8); } } catch (e) {} }
+
+function resizeCanvas() {
+    var vw = window.innerWidth || 1200;
+    var vh = window.innerHeight || 800;
+    var w = (vw < 760) ? Math.max(280, vw - 40) : Math.round(vw * 0.8);
+    var h = (vh < 520) ? Math.max(360, vh - 48) : Math.round(vh * 0.8);
+    canvas.width = Math.max(280, w);
+    canvas.height = Math.max(360, h);
+    W = canvas.width; H = canvas.height;
+    radiusScale = (Math.min(W, H) - 2 * PADDING) / 700;
+    var dp = document.getElementById('detailPanel');
+    if (mode === 'ios') { dp.style.width = W + 'px'; dp.style.maxWidth = '100%'; }
+    draw();
+}
+C = (mode === 'ios') ? readColors() : CLASSIC;
+resizeCanvas();
+renderAudit();
+
+function px(n) { return (PADDING + n.x * (W - 2 * PADDING)) * scale + panX; }
+function py(n) { return (PADDING + n.y * (H - 2 * PADDING)) * scale + panY; }
+
+function fmt(n) {
+    // 金额可能含小数：保留最多两位小数；整数部分加千分位（ES5 兼容，不用 Intl）
+    var r = Math.round(n * 100) / 100;
+    var neg = (r < 0) ? '-' : '';
+    var abs = Math.abs(r);
+    var s = (abs === Math.floor(abs)) ? abs.toFixed(0) : abs.toFixed(2);
+    var parts = s.split('.');
+    var ip = parts[0], out = '', cnt = 0;
+    for (var i = ip.length - 1; i >= 0; i--) {
+        out = ip[i] + out;
+        cnt++;
+        if (cnt % 3 === 0 && i > 0) { out = ',' + out; }
+    }
+    if (parts.length > 1) { out += '.' + parts[1]; }
+    return neg + out;
+}
+
+function nodeTotals(id) {
+    var tin = 0, tout = 0;
+    for (var i = 0; i < edges.length; i++) {
+        var e = edges[i];
+        if (e.source === id) { tout += e.amount; tin += e.back; }
+        else if (e.target === id) { tout += e.back; tin += e.amount; }
+    }
+    return { in: tin, out: tout };
+}
+
+function draw() {
+    ctx.clearRect(0, 0, W, H);
+    drawEdges();
+    drawWatermark();
+    drawNodes();
+    drawTooltip();
+    renderDetail();
+}
+
+function esc(s) {
+    return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+function roundRect(x, y, w, h, r) {
+    ctx.beginPath();
+    ctx.moveTo(x + r, y);
+    ctx.arcTo(x + w, y, x + w, y + h, r);
+    ctx.arcTo(x + w, y + h, x, y + h, r);
+    ctx.arcTo(x, y + h, x, y, r);
+    ctx.arcTo(x, y, x + w, y, r);
+    ctx.closePath();
+}
+
+function renderDetail() {
+    var panel = document.getElementById('detailPanel');
+    // 更新表头排序指示箭头（▲升序 / ▼降序）
+    var arrowEls = {
+        type: document.getElementById('arrowType'),
+        other: document.getElementById('arrowOther'),
+        amount: document.getElementById('arrowAmount')
+    };
+    var sortKeys = ['type', 'other', 'amount'];
+    for (var si = 0; si < sortKeys.length; si++) {
+        var k = sortKeys[si];
+        var aEl = arrowEls[k];
+        if (!aEl) { continue; }
+        aEl.textContent = (k === sortKey) ? ((sortDir === 1) ? '▲' : '▼') : '';
+        var thEl = aEl.parentNode;
+        if (thEl) {
+            thEl.setAttribute('aria-sort',
+                (k === sortKey) ? ((sortDir === 1) ? 'ascending' : 'descending') : 'none');
+        }
+    }
+    if (activeNode === null) { panel.style.display = 'none'; return; }
+    // 内容签名：活动节点与排序未变时重建表格会丢失勾选焦点，故跳过重建
+    var sig = activeNode + '|' + sortKey + '|' + sortDir;
+    if (sig !== lastDetailSig) {
+        lastDetailSig = sig;
+        var rows = [];
+        for (var i = 0; i < edges.length; i++) {
+            var e = edges[i];
+            if (e.source === activeNode) {
+                rows.push({ type: '支出', other: e.target, amount: e.amount });
+                rows.push({ type: '收入', other: e.target, amount: e.back });
+            } else if (e.target === activeNode) {
+                rows.push({ type: '支出', other: e.source, amount: e.back });
+                rows.push({ type: '收入', other: e.source, amount: e.amount });
+            }
+        }
+        rows.sort(function(a, b) {
+            var r = 0;
+            if (sortKey === 'type') { r = (a.type < b.type) ? -1 : (a.type > b.type ? 1 : 0); }
+            else if (sortKey === 'other') { r = (a.other < b.other) ? -1 : (a.other > b.other ? 1 : 0); }
+            else { r = a.amount - b.amount; }
+            return r * sortDir;
+        });
+        detailRows = rows;
+        document.getElementById('detailTitle').textContent = '用户' + activeNode + '与其他人员的交易详情';
+        var html = '';
+        for (var j = 0; j < rows.length; j++) {
+            var r = rows[j];
+            var color = (r.type === '收入') ? C.income : C.expense;
+            var on = !uncheckedKeys[r.other + '|' + r.type];
+            html += '<tr><td class="chk"><input type="checkbox" class="tx-chk" data-idx="' + j + '"' + (on ? ' checked' : '') + ' aria-label="仅显示该笔交易"></td>'
+                  + '<td style="color:' + color + ';">' + esc(r.type) + '</td><td>' + esc(r.other) + '</td><td>' + fmt(r.amount) + '</td></tr>';
+        }
+        if (rows.length === 0) {
+            html += '<tr><td colspan="4" class="empty">暂无交易记录</td></tr>';
+        }
+        document.getElementById('detailBody').innerHTML = html;
+    }
+    // 全选框状态：全部勾选 / 全部取消 / 部分勾选（每次调用更新，勾选变化不重建表格也能同步）
+    var chkAll = document.getElementById('chkAll');
+    var anyUn = false, anyOn = false;
+    for (var ui = 0; ui < detailRows.length; ui++) {
+        if (uncheckedKeys[detailRows[ui].other + '|' + detailRows[ui].type]) { anyUn = true; }
+        else { anyOn = true; }
+    }
+    if (detailRows.length === 0) { chkAll.checked = true; chkAll.indeterminate = false; }
+    else if (anyUn && anyOn) { chkAll.checked = false; chkAll.indeterminate = true; }
+    else if (anyUn) { chkAll.checked = false; chkAll.indeterminate = false; }
+    else { chkAll.checked = true; chkAll.indeterminate = false; }
+    panel.style.display = 'block';
+}
+
+function drawWatermark() {
+    if (mode === 'ios') {
+        ctx.font = '1.4em -apple-system, "Helvetica Neue", "PingFang SC", "Microsoft YaHei", sans-serif';
+    } else {
+        ctx.font = '1.5em Microsoft YaHei, SimHei';
+    }
+    ctx.fillStyle = C.watermark;
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'bottom';
+    if (mode === 'ios') { ctx.fillText('资金流水走向分析工具 GitHub@drpasserby(WLXC)', 18, H - 14); }
+    else { ctx.fillText('资金流水走向分析工具 GitHub@drpasserby(WLXC)', 16, H - 12); }
+}
+
+function drawArrow(x, y, angle, color, alpha) {
+    var len = 12, w = Math.PI / 7;
+    ctx.save();
+    ctx.globalAlpha = alpha;
+    ctx.fillStyle = color;
+    ctx.translate(x, y);
+    ctx.rotate(angle);
+    ctx.beginPath();
+    ctx.moveTo(0, 0);
+    ctx.lineTo(-len, -len * Math.tan(w));
+    ctx.lineTo(-len, len * Math.tan(w));
+    ctx.closePath();
+    ctx.fill();
+    ctx.restore();
+}
+
+function drawEdges() {
+    var connected = null;
+    if (activeNode !== null) { connected = Object.create(null); connected[activeNode] = true; }
+    for (var i = 0; i < edges.length; i++) {
+        var e = edges[i];
+        // 双方记录不一致（差异超过 0.01 元）时虚线 + ⚠ 标记
+        var inconsistent = (Math.abs(e.sab - e.rab) > 0.01) || (Math.abs(e.sba - e.rba) > 0.01);
+        if (hideOthers && activeNode !== null && e.source !== activeNode && e.target !== activeNode) { continue; }
+        var sn = nodeIndex[e.source];
+        var tn = nodeIndex[e.target];
+        if (!sn || !tn) { continue; }
+        var sx = px(sn), sy = py(sn);
+        var tx = px(tn), ty = py(tn);
+        var dx = tx - sx, dy = ty - sy;
+        var len = Math.sqrt(dx * dx + dy * dy);
+        if (len === 0) { continue; }
+
+        // 是否以活动节点为端点：是则可按活动节点视角计算净流向
+        var isActiveEnd = (activeNode !== null) && (e.source === activeNode || e.target === activeNode);
+        var isSrc = (e.source === activeNode);   // 活动节点在边的 source 端
+        var out, in_, outOn = true, inOn = true;
+        if (isActiveEnd) {
+            out = isSrc ? e.amount : e.back;     // 活动节点流向对方
+            in_ = isSrc ? e.back : e.amount;     // 对方流向活动节点
+            // 交易勾选过滤：只显示勾选中的交易方向（默认全选）
+            var oth = isSrc ? e.target : e.source;
+            outOn = !uncheckedKeys[oth + '|支出'];
+            inOn = !uncheckedKeys[oth + '|收入'];
+            if (!outOn && !inOn) { continue; }   // 两向都未勾选：整条边隐藏
+            if (!outOn) { out = 0; }
+            if (!inOn) { in_ = 0; }
+        }
+
+        // 颜色：默认黑色（iOS 用主题中性色保证深浅色下可见）；
+        // 点击后按活动节点视角——净流出=绿色、净流入=红色、相等仍为中性
+        var lineColor = (mode === 'classic') ? '#000000' : C.edge;
+        if (isActiveEnd) {
+            if (out > in_) { lineColor = C.income; }
+            else if (in_ > out) { lineColor = C.expense; }
+        }
+
+        var alpha = 0.7, textAlpha = 1.0;
+        if (activeNode !== null) {
+            if (isActiveEnd) { alpha = 1.0; }
+            else if (connected[e.source] && connected[e.target]) { alpha = 0.9; }
+            else { alpha = 0.15; textAlpha = 0.3; }
+        }
+
+        ctx.beginPath();
+        ctx.moveTo(sx, sy);
+        ctx.lineTo(tx, ty);
+        ctx.strokeStyle = lineColor;
+        ctx.lineWidth = 1.6;
+        ctx.globalAlpha = alpha;
+        if (inconsistent) { ctx.setLineDash([6, 4]); }
+        ctx.stroke();
+        if (inconsistent) { ctx.setLineDash([]); }
+        ctx.globalAlpha = 1;
+
+        // 箭头：仅当活动节点为端点且存在净流向。净流出箭头指向对方，净流入箭头指向活动节点。
+        // 尖端收在对应圆圈边缘（绘制于圆圈下方，不遮挡名字）。
+        if (isActiveEnd && out !== in_) {
+            var aX = isSrc ? sx : tx;   // 活动节点位置
+            var aY = isSrc ? sy : ty;
+            var oX = isSrc ? tx : sx;   // 对方位置
+            var oY = isSrc ? ty : sy;
+            var odx = oX - aX, ody = oY - aY;
+            var oLen = Math.sqrt(odx * odx + ody * ody) || 1;
+            var rAct = (isSrc ? sn : tn).size * scale * radiusScale;
+            var rOth = (isSrc ? tn : sn).size * scale * radiusScale;
+            var ax2, ay2, aAng;
+            if (out > in_) {
+                // 净流出：活动节点→对方，箭头尖端收在对方圆边
+                ax2 = oX - odx / oLen * rOth;
+                ay2 = oY - ody / oLen * rOth;
+                aAng = Math.atan2(ody, odx);
+            } else {
+                // 净流入：对方→活动节点，箭头尖端收在活动节点圆边
+                ax2 = aX + odx / oLen * rAct;
+                ay2 = aY + ody / oLen * rAct;
+                aAng = Math.atan2(-ody, -odx);
+            }
+            drawArrow(ax2, ay2, aAng, lineColor, 1.0);
+        }
+
+        if (showAmount) {
+            var label;
+            if (isActiveEnd) {
+                // 从活动节点视角显示勾选中的支出与收入（未勾选方向不显示）
+                var lblParts = [];
+                if (outOn) { lblParts.push('支出 ' + fmt(out)); }
+                if (inOn) { lblParts.push('收入 ' + fmt(in_)); }
+                label = (inconsistent ? '⚠ ' : '') + lblParts.join('  ');
+            } else {
+                label = (inconsistent ? '⚠ ' : '') + e.source + '→' + e.target + ':' + fmt(e.amount) + '  ' + e.target + '→' + e.source + ':' + fmt(e.back);
+            }
+            ctx.font = (mode === 'ios')
+                ? '11px -apple-system, "Helvetica Neue", "PingFang SC", "Microsoft YaHei", sans-serif'
+                : '11px Microsoft YaHei, SimHei';
+            var tw = ctx.measureText(label).width;
+            var lx = (sx + tx) / 2;
+            var ly = (sy + ty) / 2;
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+            ctx.globalAlpha = textAlpha;
+            if (mode === 'ios') {
+                ctx.fillStyle = C.labelBg;
+                ctx.fillRect(lx - tw / 2 - 5, ly - 10, tw + 10, 20);
+                ctx.fillStyle = lineColor;
+            } else {
+                ctx.fillStyle = '#fff';
+                ctx.fillRect(lx - tw / 2 - 4, ly - 9, tw + 8, 18);
+                ctx.fillStyle = '#333';
+            }
+            ctx.fillText(label, lx, ly);
+            ctx.globalAlpha = 1;
+        }
+    }
+}
+
+function buildConnected() {
+    var conn = Object.create(null);
+    if (activeNode === null) { return conn; }
+    for (var i = 0; i < edges.length; i++) {
+        var e = edges[i];
+        if (e.source === activeNode) { conn[e.target] = true; }
+        if (e.target === activeNode) { conn[e.source] = true; }
+    }
+    conn[activeNode] = true;
+    return conn;
+}
+
+function drawNodes() {
+    var connected = null;
+    if (activeNode !== null) { connected = buildConnected(); }
+    // 第一轮：画所有圆圈
+    for (var j = 0; j < nodes.length; j++) {
+        var n = nodes[j];
+        if (hideOthers && connected !== null && !connected[n.id]) { continue; }
+        var cx = px(n), cy = py(n);
+        var r = n.size * scale * radiusScale;
+        var fill = C.nodeFill, border = C.nodeBorder, bw = C.bwNormal;
+        if (activeNode !== null) {
+            if (n.id === activeNode) { fill = C.activeFill; border = C.activeBorder; bw = C.bwActive; }
+            else if (connected[n.id]) { fill = C.connFill; border = C.connBorder; bw = C.bwConn; }
+            else { fill = C.dimFill; border = C.dimBorder; bw = C.bwDim; }
+        }
+        ctx.beginPath();
+        ctx.arc(cx, cy, r, 0, 2 * Math.PI);
+        // 先垫一层不透明底色，保证连线永远在圆圈下方（半透明填充时也看不穿）
+        ctx.fillStyle = C.canvasBg;
+        ctx.fill();
+        ctx.fillStyle = fill;
+        ctx.fill();
+        ctx.strokeStyle = border;
+        ctx.lineWidth = bw;
+        ctx.stroke();
+    }
+    // 第二轮：所有名字最后画，保证不被任何圆圈遮挡，信息完整可读
+    // 大规模图（主体数 > LABEL_MAX_NODES）：不再逐个画名字——数千个名字会互相重叠糊成
+    // 一片，且每帧数千次 fillText 会明显卡顿；此时只画被选中主体的关联主体名字，
+    // 未选中时用悬浮提示查看名字。
+    var labelAll = (nodes.length <= LABEL_MAX_NODES);
+    var labelFont = Math.max(9, Math.round(12 * radiusScale)) + 'px ' +
+        ((mode === 'ios') ? '-apple-system,"Helvetica Neue","PingFang SC","Microsoft YaHei",sans-serif' : 'Microsoft YaHei, SimHei');
+    ctx.font = labelFont;
+    ctx.fillStyle = C.nodeText;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    for (var k = 0; k < nodes.length; k++) {
+        var n2 = nodes[k];
+        if (hideOthers && connected !== null && !connected[n2.id]) { continue; }
+        if (!labelAll && (connected === null || !connected[n2.id])) { continue; }
+        ctx.fillText(n2.id, px(n2), py(n2));
+    }
+}
+
+function drawTooltip() {
+    if (hoverNode === null) { return; }
+    var n = nodeIndex[hoverNode];
+    if (!n) { return; }
+    var t = nodeTotals(hoverNode);
+    var lines = [hoverNode, '连接数：' + n.degree, '流入：' + fmt(t.in), '流出：' + fmt(t.out)];
+    if (mode === 'classic') {
+        ctx.font = '12px Microsoft YaHei, SimHei';
+        var tw = 0;
+        for (var i = 0; i < lines.length; i++) {
+            var wl = ctx.measureText(lines[i]).width;
+            if (wl > tw) { tw = wl; }
+        }
+        var bx = 12, by = 12;
+        ctx.fillStyle = 'rgba(255,255,255,0.95)';
+        ctx.strokeStyle = '#bbb';
+        ctx.lineWidth = 1;
+        ctx.fillRect(bx, by, tw + 16, lines.length * 18 + 10);
+        ctx.strokeRect(bx, by, tw + 16, lines.length * 18 + 10);
+        ctx.fillStyle = '#333';
+        ctx.textAlign = 'left';
+        ctx.textBaseline = 'top';
+        for (var j = 0; j < lines.length; j++) {
+            ctx.fillText(lines[j], bx + 8, by + 8 + j * 18);
+        }
+        return;
+    }
+    // iOS 风格：深色圆角悬浮卡 + 柔和阴影
+    ctx.font = '12px -apple-system, "Helvetica Neue", "PingFang SC", "Microsoft YaHei", sans-serif';
+    var tw2 = 0;
+    for (var m = 0; m < lines.length; m++) {
+        var wm = ctx.measureText(lines[m]).width;
+        if (wm > tw2) { tw2 = wm; }
+    }
+    var bx2 = 12, by2 = 12;
+    var bw2 = tw2 + 20, bh = lines.length * 19 + 14;
+    ctx.save();
+    ctx.shadowColor = 'rgba(0,0,0,0.28)';
+    ctx.shadowBlur = 12;
+    ctx.shadowOffsetY = 4;
+    ctx.fillStyle = C.tooltipBg;
+    roundRect(bx2, by2, bw2, bh, 12);
+    ctx.fill();
+    ctx.restore();
+    ctx.fillStyle = C.tooltipText;
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'top';
+    for (var p = 0; p < lines.length; p++) {
+        ctx.fillText(lines[p], bx2 + 10, by2 + 7 + p * 19);
+    }
+}
+
+function renderAudit() {
+    var panel = document.getElementById('auditPanel');
+    var body = document.getElementById('auditBody');
+    if (!auditRows || auditRows.length === 0) { panel.style.display = 'none'; return; }
+    var html = '';
+    for (var i = 0; i < auditRows.length; i++) {
+        var r = auditRows[i];
+        html += '<tr><td>' + esc(r.a) + '</td><td>' + esc(r.b) + '</td><td>' + esc(r.a) + ' \u2192 ' + esc(r.b) + '</td>'
+              + '<td>' + fmt(r.spend) + '</td><td>' + fmt(r.recv) + '</td>'
+              + '<td class="diff">' + fmt(r.diff) + '</td><td>' + r.ratio.toFixed(1) + '%</td>'
+              + '<td class="oneside">' + (r.one_sided ? '单侧' : '') + '</td></tr>';
+    }
+    body.innerHTML = html;
+    panel.style.display = 'block';
+}
+
+function getMousePos(e) {
+    var rect = canvas.getBoundingClientRect();
+    return { x: e.clientX - rect.left, y: e.clientY - rect.top };
+}
+
+function nodeAt(mx, my) {
+    var conn = (hideOthers && activeNode !== null) ? buildConnected() : null;
+    for (var i = 0; i < nodes.length; i++) {
+        var n = nodes[i];
+        if (conn !== null && !conn[n.id]) { continue; }
+        var cx = px(n), cy = py(n);
+        var r = n.size * scale * radiusScale + 2;
+        var dx = mx - cx, dy = my - cy;
+        if (dx * dx + dy * dy <= r * r) { return n.id; }
+    }
+    return null;
+}
+
+function setActiveNode(id) {
+    if (activeNode === id) { return; }
+    activeNode = id;
+    uncheckedKeys = Object.create(null);  // 切换节点后恢复默认全选
+    draw();
+}
+
+canvas.addEventListener('click', function(e) {
+    var m = getMousePos(e);
+    var id = nodeAt(m.x, m.y);
+    setActiveNode((id !== null) ? id : null);
+});
+
+canvas.addEventListener('mousemove', function(e) {
+    var m = getMousePos(e);
+    hoverNode = nodeAt(m.x, m.y);
+    draw();
+});
+
+canvas.addEventListener('wheel', function(e) {
+    e.preventDefault();
+    var factor = (e.deltaY < 0) ? 1.1 : 0.9;
+    scale = Math.min(8, Math.max(0.2, scale * factor));
+    draw();
+});
+
+var dragging = false, lastX = 0, lastY = 0;
+canvas.addEventListener('mousedown', function(e) {
+    var m = getMousePos(e);
+    if (nodeAt(m.x, m.y) !== null) { return; }
+    dragging = true; lastX = e.clientX; lastY = e.clientY;
+    canvas.style.cursor = 'grabbing';
+});
+window.addEventListener('mousemove', function(e) {
+    if (!dragging) { return; }
+    panX += e.clientX - lastX;
+    panY += e.clientY - lastY;
+    lastX = e.clientX; lastY = e.clientY;
+    draw();
+});
+window.addEventListener('mouseup', function() {
+    dragging = false; canvas.style.cursor = 'grab';
+});
+
+/* 触屏手势：点选 / 单指平移 / 双指缩放 */
+var touchStartDist = 0;
+canvas.addEventListener('touchstart', function(e) {
+    var t = e.touches;
+    if (t.length === 2) {
+        var dx = t[0].clientX - t[1].clientX, dy = t[0].clientY - t[1].clientY;
+        touchStartDist = Math.sqrt(dx * dx + dy * dy);
+        dragging = false;
+        return;
+    }
+    if (t.length !== 1) { return; }
+    var m = getMousePos(t[0]);
+    var hit = nodeAt(m.x, m.y);
+    if (hit !== null) { setActiveNode(hit); tap(); return; }
+    dragging = true; lastX = t[0].clientX; lastY = t[0].clientY;
+    canvas.style.cursor = 'grabbing';
+}, { passive: true });
+
+canvas.addEventListener('touchmove', function(e) {
+    var t = e.touches;
+    if (t.length === 2) {
+        var dx = t[0].clientX - t[1].clientX, dy = t[0].clientY - t[1].clientY;
+        var d = Math.sqrt(dx * dx + dy * dy);
+        if (touchStartDist > 0) {
+            scale = Math.min(8, Math.max(0.2, scale * (d / touchStartDist)));
+            draw();
+        }
+        touchStartDist = d;
+        if (e.cancelable) { e.preventDefault(); }
+        return;
+    }
+    if (!dragging) { return; }
+    var p = t[0];
+    panX += p.clientX - lastX;
+    panY += p.clientY - lastY;
+    lastX = p.clientX; lastY = p.clientY;
+    draw();
+    if (e.cancelable) { e.preventDefault(); }
+}, { passive: false });
+
+canvas.addEventListener('touchend', function() {
+    dragging = false; touchStartDist = 0;
+    canvas.style.cursor = 'grab';
+});
+
+document.getElementById('cbAmount').addEventListener('change', function() {
+    showAmount = this.checked; draw();
+});
+document.getElementById('cbHideOther').addEventListener('change', function() {
+    hideOthers = this.checked;
+    draw();
+});
+/* 交易详情表：点击表头切换排序（交易类型/客户方/金额，升/降序） */
+function setDetailSort(key) {
+    if (sortKey === key) { sortDir = -sortDir; }
+    else { sortKey = key; sortDir = (key === 'amount') ? -1 : 1; }
+    draw();
+}
+var detailThead = document.getElementById('detailTable').getElementsByTagName('thead')[0];
+detailThead.addEventListener('click', function(e) {
+    var t = e.target;
+    while (t && t.nodeName !== 'TH') { t = t.parentNode; }
+    if (!t || !t.id) { return; }
+    tap();
+    if (t.id === 'thType') { setDetailSort('type'); }
+    else if (t.id === 'thOther') { setDetailSort('other'); }
+    else if (t.id === 'thAmount') { setDetailSort('amount'); }
+});
+detailThead.addEventListener('keydown', function(e) {
+    if (e.key !== 'Enter' && e.key !== ' ') { return; }
+    var t = e.target;
+    if (t && t.nodeName === 'TH') { e.preventDefault(); tap(); t.click(); }
+});
+/* 交易勾选过滤：只显示勾选中的交易连线（可多选，默认全选） */
+document.getElementById('detailBody').addEventListener('change', function(e) {
+    var cb = e.target;
+    if (!cb || cb.className !== 'tx-chk') { return; }
+    var idx = parseInt(cb.getAttribute('data-idx'), 10);
+    var r = detailRows[idx];
+    if (!r) { return; }
+    var key = r.other + '|' + r.type;
+    if (cb.checked) { delete uncheckedKeys[key]; }
+    else { uncheckedKeys[key] = true; }
+    draw();
+});
+document.getElementById('chkAll').addEventListener('change', function() {
+    var on = this.checked;
+    uncheckedKeys = Object.create(null);
+    if (!on) {
+        for (var i = 0; i < detailRows.length; i++) { uncheckedKeys[detailRows[i].other + '|' + detailRows[i].type] = true; }
+    }
+    draw();
+});
+/* 视图切换：资金流向图 / 资金流水分析报告 */
+function switchView(name) {
+    var g = document.getElementById('viewGraph');
+    var r = document.getElementById('viewReport');
+    if (name === 'report') {
+        g.style.display = 'none';
+        r.style.display = 'block';
+    } else {
+        g.style.display = 'block';
+        r.style.display = 'none';
+        resizeCanvas();
+        draw();
+    }
+    window.scrollTo(0, 0);
+}
+document.getElementById('reportEntry').addEventListener('click', function() { tap(); switchView('report'); });
+document.getElementById('backToGraph').addEventListener('click', function() { tap(); switchView('graph'); });
+var titleText = document.getElementById('titleText');
+
+document.getElementById('titleInput').addEventListener('input', function() {
+    var v = this.value || '资金流向图';
+    titleText.textContent = v;
+    document.title = v;
+});
+var settingsPanel = document.getElementById('settingsPanel');
+function openSettings() {
+    settingsPanel.className = 'show';
+    settingsPanel.setAttribute('aria-hidden', 'false');
+}
+function closeSettings() {
+    settingsPanel.className = '';
+    settingsPanel.setAttribute('aria-hidden', 'true');
+}
+document.getElementById('settingsBtn').addEventListener('click', function() {
+    tap();
+    if (settingsPanel.className === 'show') { closeSettings(); } else { openSettings(); }
+});
+document.getElementById('settingsClose').addEventListener('click', function() {
+    tap(); closeSettings();
+});
+settingsPanel.addEventListener('click', function(e) {
+    if (e.target === settingsPanel) { closeSettings(); }
+});
+window.addEventListener('keydown', function(e) {
+    if (e.key === 'Escape' && settingsPanel.className === 'show') { closeSettings(); }
+});
+var segBtns = document.querySelectorAll('.seg-btn');
+for (var q = 0; q < segBtns.length; q++) {
+    (function(btn) {
+        btn.addEventListener('click', function() {
+            tap();
+            applyMode(btn.getAttribute('data-mode'));
+        });
+    })(segBtns[q]);
+}
+document.getElementById('refreshBtn').addEventListener('click', function() {
+    tap();
+    setActiveNode(null);
+    scale = 1; panX = 0; panY = 0;
+    draw();
+});
+document.getElementById('zoomIn').addEventListener('click', function() {
+    tap();
+    scale = Math.min(8, scale * 1.25);
+    draw();
+});
+document.getElementById('zoomOut').addEventListener('click', function() {
+    tap();
+    scale = Math.max(0.2, scale / 1.25);
+    draw();
+});
+
+window.addEventListener('resize', resizeCanvas);
+</script>
+</body>
+</html>'''
+
+
+AUDIT_DISPLAY_MAX = 200  # 一致性明细在页面/报告中的展示上限（全量仍参与统计计数）
+
+
+def generate_html(contract, title='资金流水分析演示图', show_amount=True, hide_other=True,
+                  default_mode='classic', template_file=None, policy_label='以支出方为准',
+                  source_file=''):
+    """生成自包含的交互式 HTML：数据内嵌、离线可用（JS 保持 ES5 兼容旧浏览器）。
+    default_mode：初始界面风格（'classic' 经典布局 / 'ios' iOS 布局），默认经典布局。
+    template_file：可选的外部 HTML 模板路径；缺省使用内嵌的 TEMPLATE_HTML（测试可显式注入）。
+    policy_label：聚合口径的中文说明，写入页面设置与数据一致性面板，便于口径追溯。
+    source_file：源数据文件路径，写入报告元信息（可选）；报告内容已并入输出 HTML。
+    内置两套界面风格，可在设置面板切换：
+      · 经典（原 1.1.7 风格）——顶栏图例、方形按钮、居中设置弹窗、朴素表格；
+      · iOS（Apple iOS 设计语言）——系统字体、毛玻璃、圆角卡片、深浅色自适应、
+        弹簧动画、安全区适配、底部弹窗设置、iOS 开关；iOS 风格下箭头收于圆圈下方不遮挡名字。
+    其余交互：点击高亮、悬浮提示、滚轮缩放、拖拽平移、触屏手势、刷新视图；
+    点击某用户后画布下方以表格展示其交易详情（交易类型/客户方/金额），不点击不显示。
+    表格首列为勾选框（默认全选）：取消勾选即只显示对应交易的连线，可多选；
+    某个方向的交易被取消后，该方向的金额不计入连线与箭头，两向都取消则整条边隐藏。
+    """
+    nodes_json = json.dumps(contract['nodes'], ensure_ascii=False).replace('</', '<\\/')
+    edges_json = json.dumps(contract['edges'], ensure_ascii=False).replace('</', '<\\/')
+    audit = contract.get('audit') or []
+    # 明细表只展示差异最大的前 AUDIT_DISPLAY_MAX 处：真实数据可能上万条，
+    # 全量塞进页面会让表格极慢且无法阅读；统计口径仍按全量计算。
+    audit_json = json.dumps(audit[:AUDIT_DISPLAY_MAX], ensure_ascii=False).replace('</', '<\\/')
+    safe_policy = (policy_label.replace('&', '&amp;').replace('<', '&lt;')
+                   .replace('>', '&gt;').replace('"', '&quot;'))
+    if audit:
+        total_diff = sum(r['diff'] for r in audit)
+        audit_line = '发现 {} 处不一致，差异合计 {:.2f} 元'.format(len(audit), total_diff)
+        audit_cap = ('　（下表按差异从大到小列出前 {} 处）'.format(AUDIT_DISPLAY_MAX)
+                     if len(audit) > AUDIT_DISPLAY_MAX else '')
+    else:
+        audit_line = '全部一致（无差异）'
+        audit_cap = ''
+    report_html = build_report_html(contract, policy_label, tol=0.01, source_file=source_file)
+    safe_title = (title.replace('&', '&amp;').replace('<', '&lt;')
+                       .replace('>', '&gt;').replace('"', '&quot;'))
+    amt_checked = ' checked' if show_amount else ''
+    hide_checked = ' checked' if hide_other else ''
+    show_js = 'true' if show_amount else 'false'
+    hide_js = 'true' if hide_other else 'false'
+
+    # 初始界面风格：经典布局（默认）或 iOS 布局
+    if default_mode == 'ios':
+        body_class = 'mode-ios'
+        mode_js = 'ios'
+        seg_classic = 'seg-btn'
+        seg_ios = 'seg-btn active'
+    else:
+        body_class = 'mode-classic'
+        mode_js = 'classic'
+        seg_classic = 'seg-btn active'
+        seg_ios = 'seg-btn'
+
+    tokens = {
+        'NODES_JSON': nodes_json,
+        'EDGES_JSON': edges_json,
+        'SAFE_TITLE': safe_title,
+        'AMT_CHECKED': amt_checked,
+        'HIDE_CHECKED': hide_checked,
+        'SHOW_JS': show_js,
+        'HIDE_JS': hide_js,
+        'BODY_CLASS': body_class,
+        'SEG_CLASSIC': seg_classic,
+        'SEG_IOS': seg_ios,
+        'MODE_JS': mode_js,
+        'POLICY_LABEL': safe_policy,
+        'AUDIT_LINE': audit_line,
+        'AUDIT_CAP': audit_cap,
+        'AUDIT_JSON': audit_json,
+        'REPORT_HTML': report_html,
+    }
+    if template_file:
+        with open(template_file, encoding='utf-8') as f:
+            html = f.read()
+    else:
+        html = TEMPLATE_HTML
+    # 单遍替换：只扫描模板原文，占位符的值不会再被当作占位符二次替换
+    html = re.sub(r'\{\{([A-Z_]+)\}\}', lambda m: tokens[m.group(1)], html)
+    return html
+
+
+def _fmt_amt(v):
+    """金额千分位格式，如 1,234,567.89。"""
+    return '{:,.2f}'.format(v)
+
+
+def _fmt_pct(ratio):
+    """比例（0~1）转百分比文本。"""
+    return '{:.1f}%'.format(ratio * 100)
+
+
+def analysis_sentences(analysis):
+    """生成资金流向参考分析的结论语句（结构化，供 HTML 报告使用）。
+    返回 [(章节标题, [句子...]), ...]；句子为纯文本（已含编号与金额）。
+    """
+    total = analysis['total']
+    nodes = analysis['nodes']
+    if total <= 0 or not nodes:
+        return [('网络概览', ['未检测到有效资金流动（流转总额为 0），暂无法给出流向研判。'])]
+
+    net_in = analysis['net_in']
+    net_out = analysis['net_out']
+    top_flows = analysis['top_flows']
+    conc = analysis['concentration']
+    ben = analysis['beneficiary']
+    chain = analysis['chain']
+    cycles = analysis['cycles']
+    total_in = sum(x[1] for x in net_in)
+    total_out = sum(x[1] for x in net_out)
+    shift_ratio = (total_in + total_out) / 2.0 / total if total > 0 else 0.0
+
+    core = []
+    if net_out:
+        core.append('资金总体上由 {} 等供给端主体流出，向 {} 等归集端主体聚拢；'.format(
+            '、'.join(x[0] for x in net_out[:3]), '、'.join(x[0] for x in net_in[:3])))
+    else:
+        core.append('未发现显著单向净流出主体，资金以双向往来为主；')
+    if top_flows:
+        amt, a, b = top_flows[0]
+        core.append('最大资金通道为 {} → {}（约 {} 元），系网络核心资金动脉；'.format(a, b, _fmt_amt(amt)))
+    if ben:
+        core.append('综合研判，{} 疑似为资金最终收益方（净流入 {} 元，沉淀率 {}）。'.format(
+            ben['node'], _fmt_amt(ben['net']), _fmt_pct(ben['retain'])))
+    else:
+        core.append('暂未识别出明显的单一最终收益方。')
+
+    overview = ['本期资金网络共涉及 {} 个主体、{} 条资金通道，资金流转总额约 {} 元。'.format(
+        len(nodes), analysis['edge_count'], _fmt_amt(total))]
+    if shift_ratio < 0.05:
+        overview.append('网络整体收支大体均衡，资金以双向往来为主，单向净转移规模有限（约占总流转的 {}）。'.format(_fmt_pct(shift_ratio)))
+    elif shift_ratio < 0.20:
+        overview.append('网络存在一定程度的单向净转移：净转移规模约占总流转的 {}，资金呈定向流动特征。'.format(_fmt_pct(shift_ratio)))
+    else:
+        overview.append('网络呈显著单向净转移态势：净转移规模约占总流转的 {}，资金沿明确方向由供给端流向归集端。'.format(_fmt_pct(shift_ratio)))
+
+    if net_out:
+        supply = ['  {}. {}：净流出 {} 元'.format(i, n, _fmt_amt(v)) for i, (n, v) in enumerate(net_out[:5], 1)]
+        supply.append('上述主体合计净流出约 {} 元，构成网络的主要资金供给端。'.format(_fmt_amt(total_out)))
+    else:
+        supply = ['未发现显著净流出主体，各主体收支大体自平衡。']
+
+    if net_in:
+        collect = ['  {}. {}：净流入 {} 元'.format(i, n, _fmt_amt(v)) for i, (n, v) in enumerate(net_in[:5], 1)]
+        collect.append('上述主体合计净流入约 {} 元，为网络的主要资金归集端。'.format(_fmt_amt(total_in)))
+    else:
+        collect = ['未发现显著净流入主体，资金呈均衡分布。']
+
+    if top_flows:
+        channels = ['  {}. {} → {}：{} 元（占流转总额 {}）'.format(
+            i, a, b, _fmt_amt(amt), _fmt_pct(amt / total)) for i, (amt, a, b) in enumerate(top_flows[:5], 1)]
+    else:
+        channels = ['未发现显著大额单笔通道。']
+
+    if total > 0 and analysis['top3_in']:
+        names = '、'.join(analysis['top3_in'])
+        if conc >= 0.5:
+            degree = '头部效应显著，资金高度向少数主体聚集'
+        elif conc >= 0.3:
+            degree = '呈中度集中格局'
+        else:
+            degree = '相对分散，未形成明显头部聚集'
+        concentration = ['前 3 大归集主体（{}）合计吸纳全网 {} 的资金，{}。'.format(names, _fmt_pct(conc), degree)]
+    else:
+        concentration = ['数据量有限，暂不评估资金集中度。']
+
+    if ben:
+        if ben['retain'] >= 0.5:
+            beneficiary = ['综合净流入规模与资金沉淀特征研判，{} 最可能为资金的最终归集方：'.format(ben['node']),
+                           '  净流入 {} 元，再流出仅 {} 元（沉淀率 {}），资金在其处形成显著沉淀，'.format(
+                               _fmt_amt(ben['net']), _fmt_amt(ben['outflow']), _fmt_pct(ben['retain'])),
+                           '  疑似为网络内的终端受益人。']
+        else:
+            beneficiary = ['净流入居前的 {} 资金沉淀率较低（{}），呈“过手”特征，'.format(ben['node'], _fmt_pct(ben['retain'])),
+                           '  更可能为资金中转枢纽而非终端受益人，终端归集方需结合更深层数据进一步识别。']
+    else:
+        beneficiary = ['未发现明显的单一最终归集方（净流入主体资金多呈过手特征或规模相当）。']
+
+    if chain and len(chain) >= 3:
+        chain_lines = ['资金沿「{}」路径逐级传导，'.format(' → '.join(chain)),
+                       '中间环节（{}）兼具收付职能，疑似资金中转枢纽。'.format('、'.join(chain[1:-1]))]
+    elif chain and len(chain) == 2:
+        chain_lines = ['最大净流出方与最大净流入方存在直接资金往来（{} → {}），主体间以直接通道为主。'.format(chain[0], chain[1])]
+    else:
+        chain_lines = ['未发现明显的多级传导链，主体间以直接往来为主。']
+
+    if cycles:
+        cycle_lines = ['检测到疑似资金回流环（仅列示前 {} 个）：'.format(len(cycles))]
+        cycle_lines.extend('  ' + ' → '.join(c) + ' → ' + c[0] for c in cycles)
+        cycle_lines.append('网络内存在资金循环流动的可能，建议结合业务背景与原始凭证进一步核查。')
+    else:
+        cycle_lines = ['未检测到明显的资金回流闭环。']
+
+    return [
+        ('核心结论', core),
+        ('网络概览', overview),
+        ('资金供给端（主要净流出方）', supply),
+        ('资金归集端（主要净流入方）', collect),
+        ('大额资金通道', channels),
+        ('资金集中度', concentration),
+        ('疑似最终收益方（初步研判，仅供参考）', beneficiary),
+        ('资金传导链', chain_lines),
+        ('资金回流提示', cycle_lines),
+    ]
+
+
+def _esc_html(s):
+    """HTML 转义（报告内容全部来自数据，需转义防错乱）。"""
+    return (s.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+            .replace('"', '&quot;'))
+
+
+def build_report_html(contract, policy_label, tol=0.01, source_file=''):
+    """生成内嵌于 HTML 的资金流水分析报告片段（样式简洁优雅，内容直接并入输出 HTML）。"""
+    audit = contract.get('audit') or []
+    edges = contract.get('edges') or []
+    analysis = analyze_flow(edges, tol=tol)
+    h = []
+
+    # ---- 头部 ----
+    h.append('<div class="rep-kicker">FUND FLOW ANALYSIS</div>')
+    h.append('<h1>资金流水分析报告</h1>')
+    h.append('<p class="rep-src">本报告使用工具 <span class="rep-src-tool">drpasserby（WLXC）/FundsAnalysis</span> 生成，结果仅供参考</p>')
+    meta = ['生成时间：' + time.strftime('%Y-%m-%d %H:%M:%S')]
+    if source_file:
+        meta.append('数据文件：' + os.path.basename(source_file))
+    meta.append('聚合口径：' + policy_label)
+    meta.append('差异容差：{} 元'.format(tol))
+    h.append('<div class="rep-meta">' + ''.join('<span>{}</span>'.format(_esc_html(m)) for m in meta) + '</div>')
+
+    # ---- 一、数据一致性检查 ----
+    h.append('<div class="rep-section"><h2>一、数据一致性检查</h2>')
+    total_diff = sum(r['diff'] for r in audit)
+    h.append('<p class="rep-stat">共 {} 对节点，其中 {} 处方向记录不一致，差异合计 {:.2f} 元。</p>'.format(
+        len(edges), len(audit), total_diff))
+    if not audit:
+        h.append('<p><span class="rep-pill rep-ok">✓ 未发现不一致记录，双方记账口径基本吻合</span></p>')
+    else:
+        h.append('<p><span class="rep-pill rep-warn">⚠ 发现 {} 处方向记录不一致{}</span></p>'.format(
+            len(audit),
+            '，下表按差异从大到小列出前 {} 处'.format(AUDIT_DISPLAY_MAX)
+            if len(audit) > AUDIT_DISPLAY_MAX else '，详见下表'))
+        h.append('<table class="rep-table"><thead><tr>'
+                 '<th>用户方</th><th>客户方</th><th>方向</th><th>支出方金额</th>'
+                 '<th>收入方金额</th><th>差异</th><th>占比</th><th>单侧</th></tr></thead><tbody>')
+        for r in audit[:AUDIT_DISPLAY_MAX]:
+            h.append('<tr><td>{}</td><td>{}</td><td>{} → {}</td><td>{:.2f}</td><td>{:.2f}</td>'
+                     '<td class="diff">{:.2f}</td><td>{:.1f}%</td><td class="one">{}</td></tr>'.format(
+                         _esc_html(r['a']), _esc_html(r['b']), _esc_html(r['a']), _esc_html(r['b']),
+                         r['spend'], r['recv'], r['diff'], r['ratio'],
+                         '单侧' if r['one_sided'] else ''))
+        h.append('</tbody></table>')
+    h.append('</div>')
+
+    # ---- 二、资金流向参考分析 ----
+    h.append('<div class="rep-section"><h2>二、资金流向参考分析</h2>')
+    h.append('<p class="rep-sub">本部分结论由程序依据流水数据自动生成，属初步研判、仅供参考。</p>')
+    for title, sts in analysis_sentences(analysis):
+        h.append('<h3>{}</h3>'.format(_esc_html(title)))
+        if title == '核心结论':
+            h.append('<div class="rep-card"><ol>')
+            for st in sts:
+                h.append('<li>{}</li>'.format(_esc_html(st.strip())))
+            h.append('</ol></div>')
+        else:
+            h.append('<ul class="rep-list">')
+            for st in sts:
+                h.append('<li>{}</li>'.format(_esc_html(st.strip())))
+            h.append('</ul>')
+    h.append('</div>')
+
+    # ---- 三、口径与局限说明 ----
+    h.append('<div class="rep-section"><h2>三、口径与局限说明</h2>')
+    notes = [
+        '图上金额 = 按所选聚合口径计算；“以支出方为准”时金额=支出方合计，仅当该方向无支出记录时回退使用收入记录（避免丢边）。',
+        '因数据无交易编号，无法区分“同一笔交易的双方记账差异”与“多笔独立交易”，差异部分请结合原始流水人工核查后再下结论。',
+        '本报告第二节的分析结论由程序依据流水数据自动生成，属初步研判、仅供参考，不构成审计结论、鉴定意见或法律意见；请在结合原始凭证与业务背景后审慎使用。',
+        '如需精确配对，建议在透视表中保留 交易ID/流水号/时间 字段。',
+    ]
+    for i, n in enumerate(notes, 1):
+        h.append('<p class="rep-note">{}. {}</p>'.format(i, _esc_html(n)))
+    h.append('</div>')
+
+    # ---- 页脚 ----
+    h.append('<div class="rep-footer">'
+             '<span class="rep-tool">资金流水走向分析工具</span>'
+             '<span class="rep-sep"> · </span>'
+             'Powered by '
+             '<a href="https://github.com/drpasserby" target="_blank" rel="noopener">GitHub@drpasserby(WLXC)</a>'
+             '</div>')
+    return '\n'.join(h)
