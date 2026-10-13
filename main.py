@@ -1,1926 +1,275 @@
+# -*- coding: utf-8 -*-
 """
-资金流水走向分析工具
-版本：1.3.2
+资金流水工具套件 v2.0.0v1
 作者：wulvxinchen
 """
-
-import tkinter as tk
-from tkinter import filedialog
-from tkinter import messagebox
 import os
 import sys
-import json
-import math
-import re
-import time
-import pandas as pd
-import networkx as nx
-from collections import defaultdict
+import traceback
+
+_HERE = os.path.dirname(os.path.abspath(__file__))
+if _HERE not in sys.path:
+    sys.path.insert(0, _HERE)
+
+import tkinter as tk
+from tkinter import ttk
+
+from core import APP_NAME, AUTHOR, GITHUB, __version__
+from core import deps
+from core import log as logger
+from core import paths
+from core import registry
+from ui import dialogs
+from ui.progress import ProgressWindow
+from ui.worker import TaskRunner
+
+BG = '#f4f5f7'
+CARD_BG = '#ffffff'
+FG_DIM = '#5a5f66'
+FG_NOTE = '#8a6d3b'
+FONT_UI = 'Microsoft YaHei UI'
 
 
-# ================= 聚合口径 =================
-# 支出/收入记录不一致时，边金额以谁为准（语义详见 build_graphs 文档字符串）
-POLICIES = [
-    ('spend', '以支出方为准'),
-    ('recv', '以收入方为准'),
-    ('max', '取大去重'),
-    ('sum', '双向求和'),
-]
-POLICY_LABELS = dict(POLICIES)
+class SuiteApp(object):
+    """主窗口：四个功能卡片 + 一键跑全程。"""
 
+    def __init__(self, root):
+        self.root = root
+        self.state = {'last_out_dir': '', 'last_input': '', 'last_style': 'classic',
+                      'last_policy': 'spend'}
+        root.title('{} v{}'.format(APP_NAME, __version__))
+        root.configure(bg=BG)
+        self._header()
+        self._cards()
+        self._bottom()
+        self.root.after(150, self._check_env)
 
-# ================= 选择数据文件与生成风格 =================
-def choose_file_and_style(root):
-    """弹窗：使用提示 + 选择数据文件 + 选择生成的 HTML 风格（默认经典布局）。
-    返回 (file_path, style, policy)；用户取消则返回 None。"""
-    dialog = tk.Toplevel(root)
-    dialog.title('生成资金流向图')
-    dialog.resizable(False, False)
-    dialog.attributes('-topmost', True)  # 置顶显示
-    dialog.grab_set()  # 模态窗口
+    # ---------- 环境自检 ----------
+    def _check_env(self):
+        """启动自检：缺依赖时把原因和解决办法直接说清楚，避免"点哪儿都报错"。"""
+        miss = deps.missing()
+        if miss:
+            self.status.config(text='缺少运行依赖：{}（点「环境自检」看详情与解决办法）'.format('、'.join(miss)),
+                               fg='#c0392b')
+            logger.log('依赖自检未通过：缺少 {}；{}'.format('、'.join(miss), deps.interpreter_info()))
+            dialogs.show_error(self.root, '缺少运行依赖', deps.advice())
+            return False
+        opt = deps.missing_optional()
+        tip = '就绪（Python {}，依赖齐全）'.format(deps.python_version())
+        if opt:
+            tip += '；可选依赖 {} 缺失（不影响 .xlsx）'.format('、'.join(opt))
+        self.status.config(text=tip)
+        logger.log('依赖自检通过：Python {}'.format(deps.python_version()))
+        return True
 
-    result = {'path': None, 'style': 'classic', 'policy': 'spend'}
+    # ---------- 界面 ----------
+    def _header(self):
+        head = tk.Frame(self.root, bg=BG)
+        head.pack(fill='x', padx=18, pady=(16, 4))
+        tk.Label(head, text=APP_NAME, font=(FONT_UI, 17, 'bold'), bg=BG).pack(anchor='w')
+        tk.Label(head, text='版本 v{}    ·    {}    ·    GPLv3    ·    {}'.format(
+            __version__, AUTHOR, GITHUB), bg=BG, fg=FG_DIM, font=('', 9)).pack(anchor='w', pady=(3, 0))
+        tk.Label(head, text='四个功能互不干扰、可单独使用；产物按固定命名落在同一个输出目录，'
+                            '下一步会自动读取。建议顺序：A → B → C → D。',
+                 bg=BG, fg=FG_DIM, font=('', 9), justify='left').pack(anchor='w', pady=(6, 0))
 
-    # 使用提示：说明可读文件格式与表格内容格式
-    tk.Label(dialog, text='可读取的文件格式：Excel（.xlsx / .xls）',
-             anchor='w', justify='left').pack(fill='x', padx=16, pady=(14, 2))
-    tk.Label(dialog, text='表格内容格式（第 1 行为表头）：',
-             anchor='w', justify='left').pack(fill='x', padx=16)
-    tk.Label(dialog, text='用户方 | 支出/收入 | 客户方 | 金额（元）',
-             anchor='w', justify='left', font=('Microsoft YaHei UI', 10, 'bold')).pack(fill='x', padx=16, pady=(0, 2))
-    tk.Label(dialog, text='（若表头与预设不一致，仍按默认列位读取：\n第 1 列=用户方、第 2 列=支出/收入、第 3 列=客户方、第 4 列=金额）',
-             anchor='w', justify='left', fg='#555555').pack(fill='x', padx=16, pady=(0, 8))
-
-    # 文件选择行
-    file_var = tk.StringVar(value='（未选择文件）')
-    file_frame = tk.Frame(dialog)
-    tk.Entry(file_frame, textvariable=file_var, width=34, state='readonly').pack(side='left', padx=(12, 6))
-
-    def pick_file():
-        p = filedialog.askopenfilename(
-            parent=dialog, title='选择数据文件',
-            filetypes=[('Excel 文件', '*.xlsx;*.xls'), ('所有文件', '*.*')])
-        if p:
-            result['path'] = p
-            file_var.set(os.path.basename(p))
-
-    tk.Button(file_frame, text='选择文件...', command=pick_file).pack(side='left')
-    file_frame.pack(pady=6)
-
-    # 风格选择行
-    style_var = tk.StringVar(value='classic')
-    tk.Label(dialog, text='HTML 风格：', anchor='w').pack(fill='x', padx=16)
-    tk.Radiobutton(dialog, text='经典布局（默认）', value='classic', variable=style_var).pack(anchor='w', padx=28)
-    tk.Radiobutton(dialog, text='iOS 布局', value='ios', variable=style_var).pack(anchor='w', padx=28)
-
-    # 聚合口径选择行
-    tk.Label(dialog, text='聚合口径（双方记录不一致时以谁为准）：', anchor='w').pack(fill='x', padx=16, pady=(8, 0))
-    policy_var = tk.StringVar(value='spend')
-    for pv, pl in POLICIES:
-        tk.Radiobutton(dialog, text=pl, value=pv, variable=policy_var).pack(anchor='w', padx=28)
-
-    def confirm():
-        if not result['path']:
-            messagebox.showwarning('提示', '请先选择数据文件。', parent=dialog)
-            return
-        result['style'] = style_var.get()
-        result['policy'] = policy_var.get()
-        dialog.destroy()
-
-    def cancel():
-        result['path'] = None
-        dialog.destroy()
-
-    tk.Button(dialog, text='生成', width=14, command=confirm).pack(pady=(8, 4))
-    dialog.protocol('WM_DELETE_WINDOW', cancel)
-
-    dialog.wait_window()  # 阻塞直到对话框关闭
-
-    if not result['path']:
-        return None
-    return result['path'], result['style'], result['policy']
-
-
-# ================= 数据校验与清洗 =================
-def validate_and_clean(raw_df):
-    """校验数据格式并清洗：返回 (清洗后的DataFrame, 提示信息列表)。
-    列数不足时抛 ValueError（由调用方以弹窗呈现，避免打包后错误信息不可见）。"""
-    messages = []
-
-    if raw_df.shape[1] < 4:
-        raise ValueError(
-            '数据列数不足：当前共 {} 列，至少需要 4 列。\n'
-            '请确认数据格式为：用户方 | 支出/收入 | 客户方 | 金额'.format(raw_df.shape[1]))
-
-    # 表头软校验（仅提示，不阻断）：列位始终按默认顺序读取，不依赖表头文字。
-    # 若表头与预设不一致，仍按 第 1 列=用户方、第 2 列=支出/收入、第 3 列=客户方、第 4 列=金额 读取。
-    headers = [str(h) for h in raw_df.columns[:4]]
-    if not ('收入' in headers[1] or '支出' in headers[1]) or '金额' not in headers[3]:
-        messages.append('提示：表头与预设不一致（应为 用户方|支出/收入|客户方|金额），'
-                        '已按默认列位读取：第 1 列=用户方，第 2 列=支出/收入，第 3 列=客户方，第 4 列=金额')
-
-    cleaned = []
-    bad_rows = []
-    self_loops = 0
-    for i, row in raw_df.iterrows():
-        row_no = i + 2  # 表头占第 1 行，数据从第 2 行开始
-        a, direction, c, amount = row.iloc[0], row.iloc[1], row.iloc[2], row.iloc[3]
-
-        if pd.isna(a) or pd.isna(c) or pd.isna(direction):
-            bad_rows.append('第 {} 行：用户方/客户方/方向 存在空值'.format(row_no))
-            continue
-
-        a = str(a).strip()
-        direction = str(direction).strip()
-        c = str(c).strip()
-
-        if not a or not c or not direction:
-            bad_rows.append('第 {} 行：用户方/客户方/方向 为空白'.format(row_no))
-            continue
-
-        if '支出' not in direction and '收入' not in direction:
-            bad_rows.append('第 {} 行：方向“{}”不是“支出”或“收入”'.format(row_no, direction))
-            continue
-
+    def _cards(self):
+        wrap = tk.Frame(self.root, bg=BG)
+        wrap.pack(fill='both', expand=True, padx=18, pady=8)
+        for spec in registry.TOOLS:
+            self._card(wrap, spec.title, spec.subtitle,
+                       lambda s=spec: self._open(s.id), enabled=spec.enabled, note=spec.note)
         try:
-            amount = float(amount)
-        except (TypeError, ValueError):
-            bad_rows.append('第 {} 行：金额“{}”无法转换为数字'.format(row_no, amount))
-            continue
-
-        # 金额必须是有限的非负数（拦截 NaN / ±Inf / 负数，避免污染后续求和）
-        if not math.isfinite(amount) or amount < 0:
-            bad_rows.append('第 {} 行：金额“{}”不是有效的非负数字'.format(row_no, amount))
-            continue
-
-        if a == c:
-            self_loops += 1
-
-        cleaned.append([a, direction, c, amount])
-
-    if self_loops:
-        messages.append('自环记录 {} 条（已跳过）'.format(self_loops))
-    if bad_rows:
-        messages.append('发现 {} 处问题，已自动跳过：'.format(len(bad_rows)))
-        messages.extend(bad_rows[:20])
-        if len(bad_rows) > 20:
-            messages.append('……共 {} 处，仅显示前 20 处'.format(len(bad_rows)))
-
-    return pd.DataFrame(cleaned, columns=raw_df.columns[:4]), messages
-
-
-# ================= 图构建（一次遍历，按节点对聚合“不重复”的双向流水） =================
-def build_graphs(df, policy='spend'):
-    """一次遍历，按无序节点对聚合双向流水，并按所选聚合口径取值。
-    对每一对 (a, b)（a 为字典序较小端）：
-      · spend[(a,b)]：a 记“支出”给 b 的总额（钱 a→b）
-      · recv[(a,b)]：b 记“收入”自 a 的总额（钱 a→b，双方视角的同一批交易）
-    聚合口径 policy（双方记录不一致时以谁为准）：
-      · 'spend'：以支出方为准（默认）；该方向无支出记录时回退用收入记录，避免丢边
-      · 'recv' ：以收入方为准；无收入记录时回退用支出记录
-      · 'max'  ：取大去重（旧版默认行为）
-      · 'sum'  ：双向求和（仅当确认双方是相互独立的记录时使用，可能重复计）
-    注意：数据无交易编号时，无法区分“同一笔交易的双方记账差异”与“多笔独立交易”，
-    因此聚合口径是研究者的显式选择而非自动猜测；差异明细由 audit_consistency() 输出。
-    返回无向图 G，每对节点一条边：
-      out=a→b 口径金额、inn=b→a 口径金额，
-      sab/rab= a→b 的支出方/收入方合计、sba/rba= b→a 的支出方/收入方合计（供一致性审计）。
-    """
-    spend = defaultdict(float)  # spend[(付款方, 收款方)] = 付款方记的“支出”总额
-    recv = defaultdict(float)   # recv[(付款方, 收款方)] = 收款方记的“收入”总额（钱从付款方流向收款方）
-
-    for _, row in df.iterrows():
-        a = str(row.iloc[0]).strip()
-        direction = str(row.iloc[1]).strip()
-        c = str(row.iloc[2]).strip()
-        amount = float(row.iloc[3])
-
-        if a == c:
-            continue
-
-        if '支出' in direction:
-            spend[(a, c)] += amount
-        elif '收入' in direction:
-            # “a 收入 c”表示钱从 c 流向 a
-            recv[(c, a)] += amount
-
-    G = nx.Graph()
-    pairs = {}
-    for (a, b) in set(spend) | set(recv):
-        pairs[(min(a, b), max(a, b))] = True  # 每对只保留一个规范方向
-    for (a, b) in sorted(pairs):
-        sa, ra = spend.get((a, b), 0.0), recv.get((a, b), 0.0)  # a→b
-        sb, rb = spend.get((b, a), 0.0), recv.get((b, a), 0.0)  # b→a
-        if policy == 'spend':
-            ab = sa if sa > 0 else ra
-            ba = sb if sb > 0 else rb
-        elif policy == 'recv':
-            ab = ra if ra > 0 else sa
-            ba = rb if rb > 0 else sb
-        elif policy == 'max':
-            ab = max(sa, ra)
-            ba = max(sb, rb)
-        elif policy == 'sum':
-            ab = sa + ra
-            ba = sb + rb
-        else:
-            raise ValueError('未知聚合口径：{!r}（可选 spend/recv/max/sum）'.format(policy))
-        G.add_edge(a, b, out=ab, inn=ba, sab=sa, rab=ra, sba=sb, rba=rb)
-    return G
-
-
-def audit_consistency(G, tol=0.01):
-    """逐对比较支出方/收入方合计，返回不一致明细列表（按差异降序）。
-    每条记录：{a, b, spend, recv, diff, ratio, one_sided}
-      · spend/recv：方向 a→b 的支出方/收入方合计（金额四舍五入到分）
-      · diff：|spend - recv|（大于 tol 才记录）
-      · ratio：diff / max(spend, recv) * 100（%）
-      · one_sided：只有单侧记录（spend==0 或 recv==0）
-    """
-    rows = []
-    for u, v in sorted(G.edges()):
-        info = G[u][v]
-        for a, b, sp, rv in ((u, v, info.get('sab', 0.0), info.get('rab', 0.0)),
-                             (v, u, info.get('sba', 0.0), info.get('rba', 0.0))):
-            if sp <= 0 and rv <= 0:
-                continue
-            diff = abs(sp - rv)
-            if diff > tol:
-                rows.append({
-                    'a': a, 'b': b,
-                    'spend': round(sp, 2), 'recv': round(rv, 2),
-                    'diff': round(diff, 2),
-                    'ratio': round(diff / max(sp, rv) * 100, 1) if max(sp, rv) else 0.0,
-                    'one_sided': (sp == 0) or (rv == 0),
-                })
-    rows.sort(key=lambda r: -r['diff'])
-    return rows
-
-
-# ================= 数据契约（供 HTML 渲染使用） =================
-def build_contract(G, tol=0.01):
-    """生成 HTML 端使用的数据契约：坐标归一化到 [0,1]，节点大小设上限。
-    布局后做重叠消除，配合 HTML 端的半径缩放，任意窗口尺寸下圆圈互不遮挡。
-    返回 {'nodes': [...], 'edges': [...]}；每条边 amount=source→target 不重复总额，
-    back=target→source 不重复总额。
-    """
-    all_nodes = sorted(G.nodes())
-
-    pos = nx.spring_layout(G, k=4, seed=42) if len(G.nodes()) > 0 else {}
-
-    degree_dict = {n: G.degree(n) for n in all_nodes}
-
-    # 节点大小：基础值 + 度 * 缩放，设上限防止枢纽节点过大
-    base_size = 500
-    scale = 300
-    max_size = 3000
-    size_dict = {n: min(base_size + scale * degree_dict[n], max_size) for n in all_nodes}
-    max_s = max(size_dict.values()) if size_dict else 1
-    min_s = min(size_dict.values()) if size_dict else 1
-
-    display_s = {}
-    for n in all_nodes:
-        raw_s = size_dict[n]
-        display_s[n] = 15 + (raw_s - min_s) / (max_s - min_s) * 40 if max_s != min_s else 30
-
-    # 坐标归一化到 [0,1]
-    xs = [pos[n][0] for n in all_nodes if n in pos]
-    ys = [pos[n][1] for n in all_nodes if n in pos]
-    if xs and ys:
-        minx, maxx = min(xs), max(xs)
-        miny, maxy = min(ys), max(ys)
-        if maxx - minx == 0:
-            maxx += 1
-        if maxy - miny == 0:
-            maxy += 1
-    else:
-        minx, maxx, miny, maxy = 0, 1, 0, 1
-
-    pos_norm = {}
-    for node in all_nodes:
-        if node in pos:
-            pos_norm[node] = [float((pos[node][0] - minx) / (maxx - minx)),
-                              float((pos[node][1] - miny) / (maxy - miny))]
-        else:
-            pos_norm[node] = [0.5, 0.5]
-
-    # 密度自适应：圆圈总面积超过画布可用比例时整体缩小，保证任意规模都可不重叠布局
-    ref_size = 700.0
-    max_frac = 0.35
-    total_area = sum(math.pi * (display_s[n] / ref_size) ** 2 for n in all_nodes)
-    if total_area > max_frac:
-        shrink = (max_frac / total_area) ** 0.5
-        for n in all_nodes:
-            display_s[n] *= shrink
-
-    # 重叠消除：按参考画布最小边 700px 折算节点半径（与 HTML 端 radiusScale 同源），
-    # 迭代把互相遮挡的节点对推开，每轮后整体重新归一化回画布内，直至无重叠。
-    # 配合 HTML 端的半径缩放，保证任意窗口/屏幕尺寸下圆圈互不遮挡名字。
-    radius_norm = {n: display_s[n] / ref_size for n in all_nodes}
-    if len(all_nodes) <= 400:
-        def push_pass(margin):
-            """一轮推离：距离小于阈值(半径和×margin)的节点对互相推开。返回是否发生移动。"""
-            moved = False
-            for i in range(len(all_nodes)):
-                for j in range(i + 1, len(all_nodes)):
-                    ni, nj = all_nodes[i], all_nodes[j]
-                    dx = pos_norm[nj][0] - pos_norm[ni][0]
-                    dy = pos_norm[nj][1] - pos_norm[ni][1]
-                    dist2 = dx * dx + dy * dy
-                    min_dist = (radius_norm[ni] + radius_norm[nj]) * margin
-                    if dist2 < min_dist * min_dist:
-                        dist = dist2 ** 0.5 or 1e-9
-                        push = (min_dist - dist) / 2 * 1.2  # 过松弛，加快收敛
-                        ux, uy = dx / dist, dy / dist
-                        pos_norm[ni][0] -= ux * push
-                        pos_norm[ni][1] -= uy * push
-                        pos_norm[nj][0] += ux * push
-                        pos_norm[nj][1] += uy * push
-                        moved = True
-            return moved
-
-        # 主循环：推离 + 每轮整体归一化回画布内（目标留有 10% 缓冲，抵消归一化的回挤）
-        for _ in range(100):
-            if not push_pass(1.02 * 1.10):
-                break
-            xs = [pos_norm[n][0] for n in all_nodes]
-            ys = [pos_norm[n][1] for n in all_nodes]
-            cminx, cmaxx = min(xs), max(xs)
-            cminy, cmaxy = min(ys), max(ys)
-            if cmaxx - cminx == 0:
-                cmaxx = cminx + 1
-            if cmaxy - cminy == 0:
-                cmaxy = cminy + 1
-            for n in all_nodes:
-                pos_norm[n][0] = 0.02 + 0.96 * (pos_norm[n][0] - cminx) / (cmaxx - cminx)
-                pos_norm[n][1] = 0.02 + 0.96 * (pos_norm[n][1] - cminy) / (cmaxy - cminy)
-        # 收尾：不再整体归一化，按重叠严重程度优先处理，打破环形相切链
-        for _ in range(200):
-            pairs = []
-            for i in range(len(all_nodes)):
-                for j in range(i + 1, len(all_nodes)):
-                    ni, nj = all_nodes[i], all_nodes[j]
-                    dx = pos_norm[nj][0] - pos_norm[ni][0]
-                    dy = pos_norm[nj][1] - pos_norm[ni][1]
-                    dist = (dx * dx + dy * dy) ** 0.5
-                    min_dist = (radius_norm[ni] + radius_norm[nj]) * 1.02
-                    if dist < min_dist:
-                        pairs.append((min_dist - dist, ni, nj))
-            if not pairs:
-                break
-            pairs.sort(reverse=True)
-            done = 0
-            for _, ni, nj in pairs:
-                dx = pos_norm[nj][0] - pos_norm[ni][0]
-                dy = pos_norm[nj][1] - pos_norm[ni][1]
-                dist = (dx * dx + dy * dy) ** 0.5 or 1e-9
-                min_dist = (radius_norm[ni] + radius_norm[nj]) * 1.02
-                if dist < min_dist:
-                    push = (min_dist - dist) / 2 * 1.3
-                    ux, uy = dx / dist, dy / dist
-                    pos_norm[ni][0] -= ux * push
-                    pos_norm[ni][1] -= uy * push
-                    pos_norm[nj][0] += ux * push
-                    pos_norm[nj][1] += uy * push
-                    done += 1
-            if done == 0:
-                break
-        for n in all_nodes:
-            pos_norm[n][0] = min(0.98, max(0.02, pos_norm[n][0]))
-            pos_norm[n][1] = min(0.98, max(0.02, pos_norm[n][1]))
-
-    nodes_json = []
-    for node in all_nodes:
-        x, y = pos_norm[node]
-        nodes_json.append({'id': node, 'x': x, 'y': y, 'size': display_s[node], 'degree': degree_dict[node]})
-
-    def edge_list(G):
-        """每对节点一条边：amount=source→target 不重复总额，back=target→source 不重复总额。
-        build_graphs 以规范方向 (min,max) 写入 out=flow(min→max)、inn=flow(max→min)，
-        这里统一让 source 为较小端，保证方向语义稳定（G.edges() 迭代顺序与 add_edge 无关）。
-        """
-        edges = []
-        for u, v in G.edges():
-            info = G[u][v]
-            if u < v:
-                source, target = u, v
-            else:
-                source, target = v, u
-            edges.append({
-                'source': source,
-                'target': target,
-                'amount': round(info['out'], 2),
-                'back': round(info['inn'], 2),
-                'sab': round(info.get('sab', 0.0), 2),
-                'rab': round(info.get('rab', 0.0), 2),
-                'sba': round(info.get('sba', 0.0), 2),
-                'rba': round(info.get('rba', 0.0), 2),
-            })
-        return edges
-
-    return {
-        'nodes': nodes_json,
-        'edges': edge_list(G),
-        'audit': audit_consistency(G, tol),
-    }
-
-
-# ================= HTML 输出（自包含交互式查看器） =================
-# 模板内嵌于下方 TEMPLATE_HTML 常量，占位符 {{TOKEN}} 由 generate_html 单遍替换。
-# 输出仍是自包含单文件 HTML；不再依赖外部 template.html，避免文件缺失导致无法运行。
-TEMPLATE_HTML = '''<!DOCTYPE html>
-<html lang="zh-CN">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
-<title>{{SAFE_TITLE}}</title>
-<style>
-:root {
-  color-scheme: light dark;
-  --bg:#f2f2f7; --card-solid:#ffffff; --glass-bg:rgba(255,255,255,0.78);
-  --text:#1c1c1e; --text-2:#8e8e93; --separator:rgba(60,60,67,0.29); --fill:rgba(120,120,128,0.12);
-  --tint:#007aff; --income:#34c759; --expense:#ff3b30;
-  --shadow-sm:0 1px 2px rgba(0,0,0,0.04), 0 2px 8px rgba(0,0,0,0.05);
-  --shadow-md:0 2px 6px rgba(0,0,0,0.06), 0 14px 36px rgba(0,0,0,0.10);
-  --canvas-bg:#ffffff; --edge:#c7c7cc;
-  --node-fill:rgba(10,132,255,0.10); --node-border:#007aff; --node-text:#1c1c1e;
-  --active-fill:rgba(255,149,0,0.30); --active-border:#ff9500;
-  --conn-fill:rgba(52,199,89,0.20); --conn-border:#34c759;
-  --dim-fill:rgba(120,120,128,0.14); --dim-border:#aeaeb2;
-  --tooltip-bg:rgba(28,28,30,0.88); --tooltip-text:#ffffff;
-  --label-bg:rgba(255,255,255,0.92); --watermark:rgba(0,0,0,0.05);
-  --spring:cubic-bezier(0.32,0.72,0,1);
-}
-@media (prefers-color-scheme: dark) {
-  :root { --bg:#000000; --card-solid:#1c1c1e; --glass-bg:rgba(30,30,32,0.78); --text:#ffffff; --text-2:#8e8e93;
-    --separator:rgba(84,84,88,0.6); --fill:rgba(120,120,128,0.24); --tint:#0a84ff;
-    --shadow-sm:0 1px 2px rgba(0,0,0,0.4), 0 2px 8px rgba(0,0,0,0.5);
-    --shadow-md:0 2px 6px rgba(0,0,0,0.5), 0 14px 36px rgba(0,0,0,0.6);
-    --canvas-bg:#0c0c0e; --edge:#48484a;
-    --node-fill:rgba(10,132,255,0.22); --node-border:#0a84ff; --node-text:#ffffff;
-    --active-fill:rgba(255,149,0,0.35); --active-border:#ff9f0a;
-    --conn-fill:rgba(48,209,88,0.22); --conn-border:#30d158;
-    --dim-fill:rgba(120,120,128,0.26); --dim-border:#636366;
-    --tooltip-bg:rgba(44,44,46,0.94); --tooltip-text:#ffffff; --label-bg:rgba(28,28,30,0.88); --watermark:rgba(255,255,255,0.07);
-  }
-}
-/* ================= 经典界面（默认样式，对应 1.1.7） ================= */
-html, body { margin:0; padding:0; }
-body { display:flex; flex-direction:column; align-items:center;
-       font-family:'Microsoft YaHei','SimHei',sans-serif; background:#fafafa; }
-#page { width:100%; display:flex; flex-direction:column; align-items:center; }
-#titleText { margin:8px 0 2px; font-size:20px; color:#333; }
-#legendClassic { font-size:13px; color:#555; margin:12px 0 8px; }
-#legendIos { display:none; }
-#canvasWrap { position:relative; }
-#canvas { border:1px solid #ccc; background:#fff; cursor:grab; }
-#zoomBtns { position:absolute; right:10px; bottom:10px; display:flex; flex-direction:column; gap:6px; }
-#zoomBtns button { width:36px; height:36px; font-size:24px; line-height:1; cursor:pointer;
-                   border:1px solid #bbb; border-radius:4px; background:#fff; color:#333;
-                   -webkit-user-select:none; user-select:none; padding:0; }
-#zoomBtns button:hover { background:#f0f0f0; }
-#zoomBtns button:active { background:#e0e0e0; }
-#settingsPanel { display:none; position:absolute; top:0; left:0; right:0; bottom:0;
-                 background:rgba(0,0,0,0.25); z-index:10; }
-#settingsPanel.show { display:block; }
-#settingsBox { position:absolute; top:50%; left:50%; transform:translate(-50%,-50%);
-               background:#fff; border:1px solid #ccc; border-radius:6px; padding:16px 20px;
-               font-size:14px; color:#333; box-shadow:0 4px 16px rgba(0,0,0,0.2); }
-#grabber { display:none; }
-#settingsTitle { font-size:16px; font-weight:bold; margin-bottom:8px; }
-#settingsBox .row { display:block; margin:8px 0; cursor:pointer; }
-#settingsBox #titleRow { margin:8px 0; cursor:default; }
-#titleRow .rowLabel::after { content:'：'; }
-#settingsBox .switch { display:inline-block; vertical-align:middle; }
-#settingsBox .switch input { position:static; opacity:1; width:auto; height:auto; margin:0; }
-#settingsBox .switch .track, #settingsBox .switch .thumb { display:none; }
-#settingsClose { margin-top:12px; padding:4px 16px; cursor:pointer; }
-.t-ios { display:none; }
-.t-classic { display:inline; }
-.seg { display:inline-flex; vertical-align:middle; }
-.seg-btn { border:1px solid #bbb; background:#fff; color:#333; padding:2px 12px; cursor:pointer; font-size:13px; }
-.seg-btn.active { background:#007aff; color:#fff; border-color:#007aff; }
-#detailPanel { display:none; margin:16px auto 40px; width:80%; max-width:1000px;
-               min-width:400px; font-size:14px; color:#333; }
-#detailTitle { text-align:center; font-size:17px; margin:0 0 10px; }
-#detailTable { border-collapse:collapse; width:100%; background:#fff; }
-#detailTable th, #detailTable td { border:1px solid #dcdcdc; padding:7px 14px; text-align:center; }
-#detailTable th { background:#f0f4f8; color:#333; font-weight:bold; cursor:pointer; -webkit-user-select:none; user-select:none; }
-#detailTable th .sortArrow { font-size:11px; margin-left:4px; color:#888; }
-#detailTable th:hover { background:#e6edf4; }
-#detailTable tbody tr:nth-child(even) { background:#fafafa; }
-#detailTable tbody tr:hover { background:#f0f7ff; }
-#detailTable td.empty { color:#999; }
-#detailTable th.chk, #detailTable td.chk { width:44px; }
-#detailTable input.tx-chk, #detailTable #chkAll { width:16px; height:16px; cursor:pointer; vertical-align:middle; margin:0; }
-/* ================= 数据一致性面板（经典） ================= */
-#auditPanel { display:none; margin:16px auto 40px; width:80%; max-width:1000px;
-               min-width:400px; font-size:14px; color:#333; }
-#auditTitle { text-align:center; font-size:17px; margin:0 0 4px; }
-#auditPolicy { text-align:center; font-size:13px; color:#666; margin:0 0 10px; }
-#auditTable { border-collapse:collapse; width:100%; background:#fff; }
-#auditTable th, #auditTable td { border:1px solid #dcdcdc; padding:6px 12px; text-align:center; }
-#auditTable th { background:#f0f4f8; color:#333; font-weight:bold; }
-#auditTable tbody tr:nth-child(even) { background:#fafafa; }
-#auditTable td.diff { color:#c0392b; font-weight:bold; }
-#auditTable td.oneside { color:#e67e22; }
-.dashline { display:inline-block; width:14px; border-top:1.5px dashed #999; margin-right:7px; vertical-align:middle; }
-/* ================= iOS 界面覆盖（body.mode-ios） ================= */
-body.mode-ios { background:var(--bg); color:var(--text); -webkit-font-smoothing:antialiased;
-  -webkit-tap-highlight-color:transparent;
-  font-family:-apple-system,BlinkMacSystemFont,"SF Pro Text","SF Pro Display","Helvetica Neue","PingFang SC","Hiragino Sans GB","Microsoft YaHei","Microsoft YaHei UI",sans-serif;
-  min-height:100vh; padding:16px;
-  padding:max(16px,env(safe-area-inset-top)) max(16px,env(safe-area-inset-right)) max(28px,env(safe-area-inset-bottom)) max(16px,env(safe-area-inset-left)); }
-body.mode-ios #page { animation:pageIn .5s var(--spring) both; }
-@keyframes pageIn { from { opacity:0; transform:translateY(8px); } to { opacity:1; transform:none; } }
-body.mode-ios #titleText { font-size:32px; font-size:clamp(26px,4.5vw,34px); font-weight:700;
-  letter-spacing:-0.022em; line-height:1.15; margin:10px 0 0; color:var(--text); }
-body.mode-ios #legendClassic { display:none; }
-body.mode-ios #legendIos { display:flex; gap:22px; justify-content:center; align-items:center;
-  font-size:13px; color:var(--text-2); margin:10px 0 22px; letter-spacing:0.01em; }
-#legendIos .dot { width:8px; height:8px; border-radius:50%; display:inline-block; margin-right:7px; }
-body.mode-ios #canvasWrap { display:inline-block; max-width:100%; border-radius:24px; overflow:hidden;
-  background:var(--canvas-bg); box-shadow:var(--shadow-md); }
-body.mode-ios #canvas { border:none; display:block; background:transparent; touch-action:none; }
-body.mode-ios #zoomBtns { right:14px; bottom:14px; gap:12px; }
-body.mode-ios #zoomBtns button { width:46px; height:46px; border-radius:50%; border:0.5px solid var(--separator);
-  background:var(--glass-bg); -webkit-backdrop-filter:saturate(180%) blur(20px); backdrop-filter:saturate(180%) blur(20px);
-  color:var(--tint); font-size:22px; box-shadow:var(--shadow-sm); touch-action:manipulation;
-  transition:transform .18s var(--spring), opacity .18s ease, background .18s ease; }
-body.mode-ios #zoomBtns button:hover { background:var(--fill); }
-body.mode-ios #zoomBtns button:active { transform:scale(0.90); opacity:0.72; }
-body.mode-ios #zoomBtns button:focus-visible, body.mode-ios #settingsClose:focus-visible, body.mode-ios #titleInput:focus-visible { outline:2px solid var(--tint); outline-offset:2px; }
-body.mode-ios #settingsPanel { display:flex; position:fixed; left:0; top:0; right:0; bottom:0; z-index:50; background:rgba(0,0,0,0.4);
-  align-items:flex-end; justify-content:center; visibility:hidden; opacity:0; pointer-events:none;
-  transition:opacity .3s ease, visibility .3s ease; }
-body.mode-ios #settingsPanel.show { visibility:visible; opacity:1; pointer-events:auto; }
-body.mode-ios #settingsBox { position:static; width:100%; max-width:520px; background:var(--glass-bg);
-  -webkit-backdrop-filter:saturate(180%) blur(40px); backdrop-filter:saturate(180%) blur(40px);
-  border-radius:24px 24px 0 0; border:0; border-top:0.5px solid var(--separator);
-  box-shadow:0 -12px 40px rgba(0,0,0,0.25); color:var(--text); font-size:17px;
-  padding:8px 24px 28px; padding:8px 24px calc(28px + env(safe-area-inset-bottom));
-  transform:translateY(105%); transition:transform .5s var(--spring); }
-body.mode-ios #settingsPanel.show #settingsBox { transform:translateY(0); }
-body.mode-ios #grabber { display:block; width:36px; height:5px; border-radius:3px; background:var(--fill); margin:8px auto 12px; }
-body.mode-ios #settingsTitle { font-size:20px; font-weight:700; text-align:center; letter-spacing:-0.01em; margin:4px 0 6px; color:var(--text); }
-body.mode-ios #settingsBox .row { display:flex; align-items:center; justify-content:space-between; min-height:50px; gap:16px; padding:2px; margin:0; font-size:17px; color:var(--text); }
-body.mode-ios #settingsBox .row + .row { border-top:0.5px solid var(--separator); }
-body.mode-ios #settingsBox .row .rowLabel { order:-1; -webkit-user-select:none; user-select:none; }
-body.mode-ios #titleRow .rowLabel::after { content:none; }
-body.mode-ios #settingsBox .switch { position:relative; display:inline-block; width:51px; height:31px; flex:none; }
-body.mode-ios #settingsBox .switch input { position:absolute; opacity:0; width:100%; height:100%; margin:0; cursor:pointer; z-index:2; }
-body.mode-ios #settingsBox .switch .track { display:block; position:absolute; left:0; top:0; right:0; bottom:0; border-radius:16px; background:rgba(120,120,128,0.32); transition:background .25s ease; }
-body.mode-ios #settingsBox .switch .thumb { display:block; position:absolute; top:2px; left:2px; width:27px; height:27px; border-radius:50%; background:#fff;
-  box-shadow:0 2px 5px rgba(0,0,0,0.3), 0 0 1px rgba(0,0,0,0.1); transition:transform .3s var(--spring); }
-body.mode-ios #settingsBox .switch input:checked + .track { background:var(--income); }
-body.mode-ios #settingsBox .switch input:checked + .track + .thumb { transform:translateX(20px); }
-body.mode-ios #titleInput { flex:1; max-width:260px; min-width:0; border:none; outline:none; background:var(--fill); color:var(--text);
-  border-radius:10px; padding:8px 12px; font-size:17px; text-align:right; }
-body.mode-ios #titleInput:focus { box-shadow:0 0 0 3px rgba(10,132,255,0.28); }
-body.mode-ios #settingsClose { width:100%; margin:20px 0 4px; padding:14px; border:none; border-radius:14px; background:var(--tint); color:#fff;
-  font-size:17px; font-weight:600; transition:opacity .18s ease, transform .18s var(--spring); }
-body.mode-ios #settingsClose:active { opacity:0.85; transform:scale(0.98); }
-body.mode-ios .t-classic { display:none; }
-body.mode-ios .t-ios { display:inline; }
-body.mode-ios .seg { background:var(--fill); border-radius:9px; padding:2px; display:inline-flex; }
-body.mode-ios .seg-btn { border:none; background:transparent; color:var(--text-2); padding:5px 18px; font-size:13px; font-weight:500; border-radius:7px; }
-body.mode-ios .seg-btn.active { background:var(--card-solid); color:var(--text); box-shadow:var(--shadow-sm); }
-body.mode-ios #detailPanel { margin:24px auto 48px; width:80%; max-width:100%; font-size:15px; color:var(--text); }
-body.mode-ios #detailTitle { font-size:24px; font-weight:700; letter-spacing:-0.02em; margin:0 0 16px; color:var(--text); }
-body.mode-ios #detailTable { border-collapse:separate; border-spacing:0; background:var(--card-solid);
-  border-radius:18px; overflow:hidden; box-shadow:var(--shadow-sm); }
-body.mode-ios #detailTable th, body.mode-ios #detailTable td { border:0; border-bottom:0.5px solid var(--separator); }
-body.mode-ios #detailTable th { background:transparent; color:var(--text-2); font-size:13px; font-weight:600; letter-spacing:0.02em; padding:14px 16px 8px; cursor:pointer; -webkit-user-select:none; user-select:none; }
-body.mode-ios #detailTable th:hover { background:var(--fill); }
-body.mode-ios #detailTable th .sortArrow { color:var(--text-2); }
-body.mode-ios #detailTable td { padding:13px 16px; color:var(--text); }
-body.mode-ios #detailTable tbody tr:last-child td { border-bottom:none; }
-body.mode-ios #detailTable tbody tr:nth-child(even) { background:transparent; }
-body.mode-ios #detailTable td.empty { color:var(--text-2); }
-body.mode-ios #auditPanel { margin:24px auto 48px; width:80%; max-width:100%; font-size:15px; color:var(--text); }
-body.mode-ios #auditTitle { font-size:24px; font-weight:700; letter-spacing:-0.02em; margin:0 0 4px; color:var(--text); }
-body.mode-ios #auditPolicy { color:var(--text-2); font-size:13px; margin:0 0 16px; }
-body.mode-ios #auditTable { border-collapse:separate; border-spacing:0; background:var(--card-solid);
-  border-radius:18px; overflow:hidden; box-shadow:var(--shadow-sm); }
-body.mode-ios #auditTable th, body.mode-ios #auditTable td { border:0; border-bottom:0.5px solid var(--separator); }
-body.mode-ios #auditTable th { background:transparent; color:var(--text-2); font-size:13px; font-weight:600; padding:14px 16px 8px; }
-body.mode-ios #auditTable td { padding:13px 16px; color:var(--text); }
-body.mode-ios #auditTable tbody tr:last-child td { border-bottom:none; }
-body.mode-ios #auditTable td.diff { color:var(--expense); }
-body.mode-ios #auditTable td.oneside { color:#ff9f0a; }
-body.mode-ios .dashline { border-top-color:var(--edge); }
-/* ================= 报告入口按钮 ================= */
-#entryBar { text-align:center; padding:20px 0; }
-#reportEntry { border:none; cursor:pointer; background:var(--tint); color:#fff; font-size:14px; font-weight:600;
-  padding:11px 30px; border-radius:999px; box-shadow:0 4px 14px rgba(10,132,255,0.25);
-  transition:transform .18s ease, box-shadow .18s ease; -webkit-user-select:none; user-select:none; }
-#reportEntry:hover { transform:translateY(-1px); box-shadow:0 6px 18px rgba(10,132,255,0.32); }
-#reportEntry:active { transform:translateY(0); }
-#reportEntry .entryArrow { margin-left:8px; }
-/* ================= 资金流水分析报告（内置文档） ================= */
-#viewReport { display:none; }
-#backBar { max-width:880px; margin:22px auto 0; padding:0 12px; }
-#backToGraph { border:1px solid var(--separator); background:var(--card-solid); color:var(--text); font-size:13px;
-  padding:8px 18px; border-radius:999px; cursor:pointer; transition:all .18s ease; }
-#backToGraph:hover { border-color:var(--tint); color:var(--tint); }
-#reportDoc { max-width:880px; margin:16px auto 56px; padding:44px 52px; background:var(--card-solid);
-  border:0.5px solid var(--separator); border-radius:16px; box-shadow:var(--shadow-md);
-  color:var(--text); font-size:15px; line-height:1.85; }
-#reportDoc h1 { font-size:25px; font-weight:700; letter-spacing:-0.01em; margin:0 0 4px; color:var(--text); }
-#reportDoc h2 { font-size:18px; font-weight:700; margin:0 0 14px; color:var(--text); display:flex; align-items:center; gap:10px; }
-#reportDoc h2::before { content:''; width:4px; height:17px; border-radius:2px; background:var(--tint); flex:none; }
-#reportDoc h3 { font-size:14.5px; font-weight:600; color:var(--text); margin:20px 0 8px; }
-.rep-kicker { font-size:11.5px; letter-spacing:0.22em; color:var(--tint); font-weight:600; margin:0 0 6px; text-transform:uppercase; }
-.rep-meta { display:flex; flex-wrap:wrap; gap:8px; margin:16px 0 0; padding:14px 0 0; border-top:0.5px solid var(--separator); }
-.rep-meta span { font-size:12px; color:var(--text-2); background:var(--fill); border:0.5px solid var(--separator);
-  padding:4px 13px; border-radius:999px; }
-.rep-src { margin:8px 0 0; font-size:13px; color:var(--text-2); letter-spacing:0.02em; }
-.rep-src-tool { color:var(--text); font-weight:500; }
-.rep-section { margin-top:34px; }
-.rep-sub { color:var(--text-2); font-size:13px; margin:-4px 0 4px; }
-.rep-stat { color:var(--text); margin:4px 0 10px; }
-.rep-pill { display:inline-block; font-size:12.5px; padding:4px 14px; border-radius:999px; border:0.5px solid var(--separator); background:var(--fill); }
-.rep-ok { color:var(--income); }
-.rep-warn { color:#d97706; }
-.rep-card { background:var(--fill); border:0.5px solid var(--separator); border-left:3px solid var(--tint); border-radius:10px; padding:14px 22px; margin:12px 0 4px; }
-.rep-card ol { margin:0; padding:0; list-style:none; counter-reset:core; }
-.rep-card li { counter-increment:core; position:relative; padding:7px 0 7px 36px; }
-.rep-card li::before { content:counter(core); position:absolute; left:0; top:10px; width:22px; height:22px; border-radius:50%;
-  background:var(--tint); color:#fff; font-size:12px; font-weight:600; display:flex; align-items:center; justify-content:center; }
-.rep-list { list-style:none; margin:6px 0 2px; padding:0; }
-.rep-list li { padding:5px 0 5px 24px; position:relative; color:var(--text); }
-.rep-list li::before { content:''; position:absolute; left:5px; top:15px; width:6px; height:6px; border-radius:50%; background:var(--text-2); opacity:0.55; }
-.rep-note { color:var(--text-2); font-size:13px; margin:9px 0; padding-left:20px; position:relative; }
-.rep-note::before { content:''; position:absolute; left:6px; top:9px; width:5px; height:5px; border-radius:50%; background:var(--tint); opacity:0.6; }
-.rep-table { width:100%; border-collapse:collapse; margin:12px 0 2px; font-size:13px; }
-.rep-table th { background:var(--fill); color:var(--text-2); font-weight:600; text-align:left; padding:9px 12px; border-bottom:0.5px solid var(--separator); }
-.rep-table td { padding:8px 12px; border-bottom:0.5px solid var(--separator); color:var(--text); }
-.rep-table tr:last-child td { border-bottom:none; }
-.rep-table td.diff { color:var(--expense); font-weight:600; }
-.rep-table td.one { color:#d97706; }
-.rep-footer { margin-top:38px; padding-top:18px; border-top:0.5px solid var(--separator); text-align:center; color:var(--text-2); font-size:12.5px; letter-spacing:0.02em; }
-.rep-footer a { color:var(--text-2); text-decoration:none; border-bottom:1px solid var(--separator); transition:color .18s ease, border-color .18s ease; }
-.rep-footer a:hover { color:var(--tint); border-color:var(--tint); }
-.rep-footer .rep-tool { font-weight:600; color:var(--text); }
-.rep-footer .rep-sep { opacity:0.5; }
-@media (max-width:720px) {
-  #reportDoc { padding:28px 20px; border-radius:12px; margin:12px 10px 40px; }
-  #entryBar { padding:16px 0; }
-}
-@media (prefers-reduced-motion: reduce) { * { animation:none !important; transition-duration:0.01ms !important; } }
-
-</style>
-</head>
-<body class="{{BODY_CLASS}}">
-<div id="viewGraph">
-<div id="page">
-<h2 id="titleText">资金流水分析演示图</h2>
-<div id="entryBar"><button id="reportEntry" type="button" aria-label="查看资金流水分析报告">查看资金流水分析报告<span class="entryArrow">→</span></button></div>
-<div id="legendClassic"><span style="color:#c0392b;">——净流入</span> <span style="color:#2e8b57;">——净流出</span> <span style="margin-left:14px;border-top:1.5px dashed #999;"> 记录不一致</span></div>
-<div id="legendIos">
-  <span><span class="dot" style="background:#ff3b30;"></span>净流入</span>
-  <span><span class="dot" style="background:#34c759;"></span>净流出</span>
-  <span><span class="dashline"></span>记录不一致</span>
-</div>
-<div id="canvasWrap">
-<canvas id="canvas" role="img" aria-label="资金流向图，点击圆圈查看其交易详情"></canvas>
-<div id="zoomBtns">
-  <button id="refreshBtn" type="button" title="刷新视图" aria-label="刷新视图">↻</button>
-  <button id="settingsBtn" type="button" title="设置" aria-label="设置">⚙</button>
-  <button id="zoomIn" type="button" title="放大" aria-label="放大">+</button>
-  <button id="zoomOut" type="button" title="缩小" aria-label="缩小">−</button>
-</div>
-<div id="settingsPanel" role="dialog" aria-modal="true" aria-label="设置" aria-hidden="true">
-  <div id="settingsBox">
-    <div id="grabber"></div>
-    <div id="settingsTitle">设置</div>
-    <div class="row" id="uiStyleRow" role="radiogroup" aria-label="界面风格">
-      <span class="rowLabel">界面风格</span>
-      <span class="seg">
-        <button type="button" class="{{SEG_CLASSIC}}" data-mode="classic" aria-label="经典">经典</button>
-        <button type="button" class="{{SEG_IOS}}" data-mode="ios" aria-label="iOS">iOS</button>
-      </span>
-    </div>
-    <label class="row"><span class="switch"><input type="checkbox" id="cbAmount"{{AMT_CHECKED}}><span class="track"></span><span class="thumb"></span></span><span class="rowLabel">显示金额</span></label>
-    <label class="row" title="开启后点击某个圆圈，只显示该用户及其直接关联的圆圈和连线"><span class="switch"><input type="checkbox" id="cbHideOther"{{HIDE_CHECKED}}><span class="track"></span><span class="thumb"></span></span><span class="rowLabel">隐藏其他</span></label>
-    <div class="row" id="titleRow"><span class="rowLabel">标题</span><input type="text" id="titleInput" value="资金流水分析演示图" aria-label="标题"></div>
-    <div class="row" id="policyRow"><span class="rowLabel">聚合口径</span><span class="rowVal">{{POLICY_LABEL}}</span></div>
-    <div class="row" id="auditRow"><span class="rowLabel">数据一致性</span><span class="rowVal">{{AUDIT_LINE}}</span></div>
-    <button id="settingsClose" type="button" aria-label="完成并关闭"><span class="t-classic">关闭</span><span class="t-ios">完成</span></button>
-  </div>
-</div>
-</div>
-<div id="detailPanel">
-  <h3 id="detailTitle">用户与其他人员的交易详情</h3>
-  <table id="detailTable">
-    <thead><tr>
-      <th id="thChk" class="chk" aria-label="全选/全不选"><input type="checkbox" id="chkAll" checked></th>
-      <th id="thType" role="button" tabindex="0" aria-sort="none">交易类型 <span class="sortArrow" id="arrowType"></span></th>
-      <th id="thOther" role="button" tabindex="0" aria-sort="none">客户方 <span class="sortArrow" id="arrowOther"></span></th>
-      <th id="thAmount" role="button" tabindex="0" aria-sort="none">金额 <span class="sortArrow" id="arrowAmount"></span></th>
-    </tr></thead>
-    <tbody id="detailBody"></tbody>
-  </table>
-</div>
-<div id="auditPanel">
-  <h3 id="auditTitle">数据一致性检查</h3>
-  <div id="auditPolicy">聚合口径：{{POLICY_LABEL}}　差异容差：0.01 元</div>
-  <table id="auditTable">
-    <thead><tr>
-      <th>用户方</th><th>客户方</th><th>方向</th><th>支出方金额</th><th>收入方金额</th><th>差异</th><th>占比</th><th>单侧</th>
-    </tr></thead>
-    <tbody id="auditBody"></tbody>
-  </table>
-</div>
-</div>
-</div>
-<div id="viewReport">
-  <div id="backBar"><button id="backToGraph" type="button" aria-label="返回资金流向图">← 返回资金流向图</button></div>
-  <div id="reportDoc">{{REPORT_HTML}}</div>
-</div>
-<script>
-var nodes = {{NODES_JSON}};
-var edges = {{EDGES_JSON}};
-var auditRows = {{AUDIT_JSON}};
-var PADDING = 80;
-var radiusScale = 1;  // 节点半径随画布最小边缩放，防止不同窗口尺寸下圆圈互相遮挡
-var scale = 1, panX = 0, panY = 0;
-var activeNode = null, hoverNode = null;
-var sortKey = 'amount', sortDir = -1;  // 交易详情表排序状态：默认按金额降序
-var uncheckedKeys = Object.create(null);  // 被取消勾选的交易（默认全选）
-var detailRows = [];                       // 当前明细行（含勾选键）
-var lastDetailSig = '';                    // 明细表重建签名：活动节点+排序
-var showAmount = {{SHOW_JS}};
-var hideOthers = {{HIDE_JS}};
-/* 单边视图：每对用户一条线（source→target 为 amount，反向为 back），默认黑色 */
-/* 点击某用户后，连线按该用户视角的净流向着色：净流出=绿色，净流入=红色 */
-var canvas = document.getElementById('canvas');
-var ctx = canvas.getContext('2d');
-var W, H;
-var mode = '{{MODE_JS}}';  // 'ios' | 'classic'
-
-var nodeIndex = Object.create(null);
-for (var k = 0; k < nodes.length; k++) { nodeIndex[nodes[k].id] = nodes[k]; }
-
-/* 从 CSS 读取 iOS 主题色；经典模式使用固定色板 CLASSIC */
-function cssVar(name, fallback) {
-    var v = '';
-    try { v = getComputedStyle(document.documentElement).getPropertyValue(name); } catch (e) { v = ''; }
-    v = String(v).trim();
-    return (v === '') ? fallback : v;
-}
-function readColors() {
-    return {
-        income: cssVar('--income', '#34c759'),
-        expense: cssVar('--expense', '#ff3b30'),
-        tint: cssVar('--tint', '#007aff'),
-        edge: cssVar('--edge', '#c7c7cc'),
-        nodeFill: cssVar('--node-fill', 'rgba(10,132,255,0.10)'),
-        nodeBorder: cssVar('--node-border', '#007aff'),
-        nodeText: cssVar('--node-text', '#1c1c1e'),
-        activeFill: cssVar('--active-fill', 'rgba(255,149,0,0.30)'),
-        activeBorder: cssVar('--active-border', '#ff9500'),
-        connFill: cssVar('--conn-fill', 'rgba(52,199,89,0.20)'),
-        connBorder: cssVar('--conn-border', '#34c759'),
-        dimFill: cssVar('--dim-fill', 'rgba(120,120,128,0.14)'),
-        dimBorder: cssVar('--dim-border', '#aeaeb2'),
-        tooltipBg: cssVar('--tooltip-bg', 'rgba(28,28,30,0.88)'),
-        tooltipText: cssVar('--tooltip-text', '#ffffff'),
-        labelBg: cssVar('--label-bg', 'rgba(255,255,255,0.92)'),
-        watermark: cssVar('--watermark', 'rgba(0,0,0,0.05)'),
-        canvasBg: cssVar('--canvas-bg', '#ffffff'),
-        bwNormal: 1.4, bwActive: 3, bwConn: 2, bwDim: 0.6
-    };
-}
-var CLASSIC = {
-    income: '#2e8b57', expense: '#c0392b', edge: '#888',
-    nodeFill: '#dbe9fb', nodeBorder: '#333', nodeText: '#000',
-    activeFill: '#f39c12', activeBorder: '#c0392b',
-    connFill: '#a9dfbf', connBorder: '#2e8b57',
-    dimFill: '#e5e5e5', dimBorder: '#999',
-    tooltipBg: 'rgba(255,255,255,0.95)', tooltipText: '#333',
-    labelBg: '#fff', watermark: '#ddd', canvasBg: '#fff',
-    bwNormal: 0.8, bwActive: 3, bwConn: 2, bwDim: 0.5
-};
-var C = CLASSIC;
-
-function applyMode(newMode) {
-    mode = newMode;
-    document.body.className = (mode === 'ios') ? 'mode-ios' : 'mode-classic';
-    C = (mode === 'ios') ? readColors() : CLASSIC;
-    var segs = document.querySelectorAll('.seg-btn');
-    for (var i = 0; i < segs.length; i++) {
-        segs[i].className = (segs[i].getAttribute('data-mode') === mode) ? 'seg-btn active' : 'seg-btn';
-    }
-    var dp = document.getElementById('detailPanel');
-    if (mode === 'ios' && W) { dp.style.width = W + 'px'; dp.style.maxWidth = '100%'; }
-    else { dp.style.width = ''; dp.style.maxWidth = ''; }
-    draw();
-}
-(function() {
-    if (!window.matchMedia) { return; }
-    var mq = window.matchMedia('(prefers-color-scheme: dark)');
-    var on = function() { if (mode === 'ios') { C = readColors(); draw(); } };
-    if (mq.addEventListener) { mq.addEventListener('change', on); }
-    else if (mq.addListener) { mq.addListener(on); }
-})();
-/* 轻触反馈模拟（支持 vibrate 的浏览器/设备） */
-function tap() { try { if (navigator.vibrate) { navigator.vibrate(8); } } catch (e) {} }
-
-function resizeCanvas() {
-    var vw = window.innerWidth || 1200;
-    var vh = window.innerHeight || 800;
-    var w = (vw < 760) ? Math.max(280, vw - 40) : Math.round(vw * 0.8);
-    var h = (vh < 520) ? Math.max(360, vh - 48) : Math.round(vh * 0.8);
-    canvas.width = Math.max(280, w);
-    canvas.height = Math.max(360, h);
-    W = canvas.width; H = canvas.height;
-    radiusScale = (Math.min(W, H) - 2 * PADDING) / 700;
-    var dp = document.getElementById('detailPanel');
-    if (mode === 'ios') { dp.style.width = W + 'px'; dp.style.maxWidth = '100%'; }
-    draw();
-}
-C = (mode === 'ios') ? readColors() : CLASSIC;
-resizeCanvas();
-renderAudit();
-
-function px(n) { return (PADDING + n.x * (W - 2 * PADDING)) * scale + panX; }
-function py(n) { return (PADDING + n.y * (H - 2 * PADDING)) * scale + panY; }
-
-function fmt(n) {
-    // 金额可能含小数：保留最多两位小数；整数部分加千分位（ES5 兼容，不用 Intl）
-    var r = Math.round(n * 100) / 100;
-    var neg = (r < 0) ? '-' : '';
-    var abs = Math.abs(r);
-    var s = (abs === Math.floor(abs)) ? abs.toFixed(0) : abs.toFixed(2);
-    var parts = s.split('.');
-    var ip = parts[0], out = '', cnt = 0;
-    for (var i = ip.length - 1; i >= 0; i--) {
-        out = ip[i] + out;
-        cnt++;
-        if (cnt % 3 === 0 && i > 0) { out = ',' + out; }
-    }
-    if (parts.length > 1) { out += '.' + parts[1]; }
-    return neg + out;
-}
-
-function nodeTotals(id) {
-    var tin = 0, tout = 0;
-    for (var i = 0; i < edges.length; i++) {
-        var e = edges[i];
-        if (e.source === id) { tout += e.amount; tin += e.back; }
-        else if (e.target === id) { tout += e.back; tin += e.amount; }
-    }
-    return { in: tin, out: tout };
-}
-
-function draw() {
-    ctx.clearRect(0, 0, W, H);
-    drawEdges();
-    drawWatermark();
-    drawNodes();
-    drawTooltip();
-    renderDetail();
-}
-
-function esc(s) {
-    return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-}
-
-function roundRect(x, y, w, h, r) {
-    ctx.beginPath();
-    ctx.moveTo(x + r, y);
-    ctx.arcTo(x + w, y, x + w, y + h, r);
-    ctx.arcTo(x + w, y + h, x, y + h, r);
-    ctx.arcTo(x, y + h, x, y, r);
-    ctx.arcTo(x, y, x + w, y, r);
-    ctx.closePath();
-}
-
-function renderDetail() {
-    var panel = document.getElementById('detailPanel');
-    // 更新表头排序指示箭头（▲升序 / ▼降序）
-    var arrowEls = {
-        type: document.getElementById('arrowType'),
-        other: document.getElementById('arrowOther'),
-        amount: document.getElementById('arrowAmount')
-    };
-    var sortKeys = ['type', 'other', 'amount'];
-    for (var si = 0; si < sortKeys.length; si++) {
-        var k = sortKeys[si];
-        var aEl = arrowEls[k];
-        if (!aEl) { continue; }
-        aEl.textContent = (k === sortKey) ? ((sortDir === 1) ? '▲' : '▼') : '';
-        var thEl = aEl.parentNode;
-        if (thEl) {
-            thEl.setAttribute('aria-sort',
-                (k === sortKey) ? ((sortDir === 1) ? 'ascending' : 'descending') : 'none');
-        }
-    }
-    if (activeNode === null) { panel.style.display = 'none'; return; }
-    // 内容签名：活动节点与排序未变时重建表格会丢失勾选焦点，故跳过重建
-    var sig = activeNode + '|' + sortKey + '|' + sortDir;
-    if (sig !== lastDetailSig) {
-        lastDetailSig = sig;
-        var rows = [];
-        for (var i = 0; i < edges.length; i++) {
-            var e = edges[i];
-            if (e.source === activeNode) {
-                rows.push({ type: '支出', other: e.target, amount: e.amount });
-                rows.push({ type: '收入', other: e.target, amount: e.back });
-            } else if (e.target === activeNode) {
-                rows.push({ type: '支出', other: e.source, amount: e.back });
-                rows.push({ type: '收入', other: e.source, amount: e.amount });
-            }
-        }
-        rows.sort(function(a, b) {
-            var r = 0;
-            if (sortKey === 'type') { r = (a.type < b.type) ? -1 : (a.type > b.type ? 1 : 0); }
-            else if (sortKey === 'other') { r = (a.other < b.other) ? -1 : (a.other > b.other ? 1 : 0); }
-            else { r = a.amount - b.amount; }
-            return r * sortDir;
-        });
-        detailRows = rows;
-        document.getElementById('detailTitle').textContent = '用户' + activeNode + '与其他人员的交易详情';
-        var html = '';
-        for (var j = 0; j < rows.length; j++) {
-            var r = rows[j];
-            var color = (r.type === '收入') ? C.income : C.expense;
-            var on = !uncheckedKeys[r.other + '|' + r.type];
-            html += '<tr><td class="chk"><input type="checkbox" class="tx-chk" data-idx="' + j + '"' + (on ? ' checked' : '') + ' aria-label="仅显示该笔交易"></td>'
-                  + '<td style="color:' + color + ';">' + esc(r.type) + '</td><td>' + esc(r.other) + '</td><td>' + fmt(r.amount) + '</td></tr>';
-        }
-        if (rows.length === 0) {
-            html += '<tr><td colspan="4" class="empty">暂无交易记录</td></tr>';
-        }
-        document.getElementById('detailBody').innerHTML = html;
-    }
-    // 全选框状态：全部勾选 / 全部取消 / 部分勾选（每次调用更新，勾选变化不重建表格也能同步）
-    var chkAll = document.getElementById('chkAll');
-    var anyUn = false, anyOn = false;
-    for (var ui = 0; ui < detailRows.length; ui++) {
-        if (uncheckedKeys[detailRows[ui].other + '|' + detailRows[ui].type]) { anyUn = true; }
-        else { anyOn = true; }
-    }
-    if (detailRows.length === 0) { chkAll.checked = true; chkAll.indeterminate = false; }
-    else if (anyUn && anyOn) { chkAll.checked = false; chkAll.indeterminate = true; }
-    else if (anyUn) { chkAll.checked = false; chkAll.indeterminate = false; }
-    else { chkAll.checked = true; chkAll.indeterminate = false; }
-    panel.style.display = 'block';
-}
-
-function drawWatermark() {
-    if (mode === 'ios') {
-        ctx.font = '1.4em -apple-system, "Helvetica Neue", "PingFang SC", "Microsoft YaHei", sans-serif';
-    } else {
-        ctx.font = '1.5em Microsoft YaHei, SimHei';
-    }
-    ctx.fillStyle = C.watermark;
-    ctx.textAlign = 'left';
-    ctx.textBaseline = 'bottom';
-    if (mode === 'ios') { ctx.fillText('资金流水走向分析工具 GitHub@drpasserby(WLXC)', 18, H - 14); }
-    else { ctx.fillText('资金流水走向分析工具 GitHub@drpasserby(WLXC)', 16, H - 12); }
-}
-
-function drawArrow(x, y, angle, color, alpha) {
-    var len = 12, w = Math.PI / 7;
-    ctx.save();
-    ctx.globalAlpha = alpha;
-    ctx.fillStyle = color;
-    ctx.translate(x, y);
-    ctx.rotate(angle);
-    ctx.beginPath();
-    ctx.moveTo(0, 0);
-    ctx.lineTo(-len, -len * Math.tan(w));
-    ctx.lineTo(-len, len * Math.tan(w));
-    ctx.closePath();
-    ctx.fill();
-    ctx.restore();
-}
-
-function drawEdges() {
-    var connected = null;
-    if (activeNode !== null) { connected = Object.create(null); connected[activeNode] = true; }
-    for (var i = 0; i < edges.length; i++) {
-        var e = edges[i];
-        // 双方记录不一致（差异超过 0.01 元）时虚线 + ⚠ 标记
-        var inconsistent = (Math.abs(e.sab - e.rab) > 0.01) || (Math.abs(e.sba - e.rba) > 0.01);
-        if (hideOthers && activeNode !== null && e.source !== activeNode && e.target !== activeNode) { continue; }
-        var sn = nodeIndex[e.source];
-        var tn = nodeIndex[e.target];
-        if (!sn || !tn) { continue; }
-        var sx = px(sn), sy = py(sn);
-        var tx = px(tn), ty = py(tn);
-        var dx = tx - sx, dy = ty - sy;
-        var len = Math.sqrt(dx * dx + dy * dy);
-        if (len === 0) { continue; }
-
-        // 是否以活动节点为端点：是则可按活动节点视角计算净流向
-        var isActiveEnd = (activeNode !== null) && (e.source === activeNode || e.target === activeNode);
-        var isSrc = (e.source === activeNode);   // 活动节点在边的 source 端
-        var out, in_, outOn = true, inOn = true;
-        if (isActiveEnd) {
-            out = isSrc ? e.amount : e.back;     // 活动节点流向对方
-            in_ = isSrc ? e.back : e.amount;     // 对方流向活动节点
-            // 交易勾选过滤：只显示勾选中的交易方向（默认全选）
-            var oth = isSrc ? e.target : e.source;
-            outOn = !uncheckedKeys[oth + '|支出'];
-            inOn = !uncheckedKeys[oth + '|收入'];
-            if (!outOn && !inOn) { continue; }   // 两向都未勾选：整条边隐藏
-            if (!outOn) { out = 0; }
-            if (!inOn) { in_ = 0; }
-        }
-
-        // 颜色：默认黑色（iOS 用主题中性色保证深浅色下可见）；
-        // 点击后按活动节点视角——净流出=绿色、净流入=红色、相等仍为中性
-        var lineColor = (mode === 'classic') ? '#000000' : C.edge;
-        if (isActiveEnd) {
-            if (out > in_) { lineColor = C.income; }
-            else if (in_ > out) { lineColor = C.expense; }
-        }
-
-        var alpha = 0.7, textAlpha = 1.0;
-        if (activeNode !== null) {
-            if (isActiveEnd) { alpha = 1.0; }
-            else if (connected[e.source] && connected[e.target]) { alpha = 0.9; }
-            else { alpha = 0.15; textAlpha = 0.3; }
-        }
-
-        ctx.beginPath();
-        ctx.moveTo(sx, sy);
-        ctx.lineTo(tx, ty);
-        ctx.strokeStyle = lineColor;
-        ctx.lineWidth = 1.6;
-        ctx.globalAlpha = alpha;
-        if (inconsistent) { ctx.setLineDash([6, 4]); }
-        ctx.stroke();
-        if (inconsistent) { ctx.setLineDash([]); }
-        ctx.globalAlpha = 1;
-
-        // 箭头：仅当活动节点为端点且存在净流向。净流出箭头指向对方，净流入箭头指向活动节点。
-        // 尖端收在对应圆圈边缘（绘制于圆圈下方，不遮挡名字）。
-        if (isActiveEnd && out !== in_) {
-            var aX = isSrc ? sx : tx;   // 活动节点位置
-            var aY = isSrc ? sy : ty;
-            var oX = isSrc ? tx : sx;   // 对方位置
-            var oY = isSrc ? ty : sy;
-            var odx = oX - aX, ody = oY - aY;
-            var oLen = Math.sqrt(odx * odx + ody * ody) || 1;
-            var rAct = (isSrc ? sn : tn).size * scale * radiusScale;
-            var rOth = (isSrc ? tn : sn).size * scale * radiusScale;
-            var ax2, ay2, aAng;
-            if (out > in_) {
-                // 净流出：活动节点→对方，箭头尖端收在对方圆边
-                ax2 = oX - odx / oLen * rOth;
-                ay2 = oY - ody / oLen * rOth;
-                aAng = Math.atan2(ody, odx);
-            } else {
-                // 净流入：对方→活动节点，箭头尖端收在活动节点圆边
-                ax2 = aX + odx / oLen * rAct;
-                ay2 = aY + ody / oLen * rAct;
-                aAng = Math.atan2(-ody, -odx);
-            }
-            drawArrow(ax2, ay2, aAng, lineColor, 1.0);
-        }
-
-        if (showAmount) {
-            var label;
-            if (isActiveEnd) {
-                // 从活动节点视角显示勾选中的支出与收入（未勾选方向不显示）
-                var lblParts = [];
-                if (outOn) { lblParts.push('支出 ' + fmt(out)); }
-                if (inOn) { lblParts.push('收入 ' + fmt(in_)); }
-                label = (inconsistent ? '⚠ ' : '') + lblParts.join('  ');
-            } else {
-                label = (inconsistent ? '⚠ ' : '') + e.source + '→' + e.target + ':' + fmt(e.amount) + '  ' + e.target + '→' + e.source + ':' + fmt(e.back);
-            }
-            ctx.font = (mode === 'ios')
-                ? '11px -apple-system, "Helvetica Neue", "PingFang SC", "Microsoft YaHei", sans-serif'
-                : '11px Microsoft YaHei, SimHei';
-            var tw = ctx.measureText(label).width;
-            var lx = (sx + tx) / 2;
-            var ly = (sy + ty) / 2;
-            ctx.textAlign = 'center';
-            ctx.textBaseline = 'middle';
-            ctx.globalAlpha = textAlpha;
-            if (mode === 'ios') {
-                ctx.fillStyle = C.labelBg;
-                ctx.fillRect(lx - tw / 2 - 5, ly - 10, tw + 10, 20);
-                ctx.fillStyle = lineColor;
-            } else {
-                ctx.fillStyle = '#fff';
-                ctx.fillRect(lx - tw / 2 - 4, ly - 9, tw + 8, 18);
-                ctx.fillStyle = '#333';
-            }
-            ctx.fillText(label, lx, ly);
-            ctx.globalAlpha = 1;
-        }
-    }
-}
-
-function buildConnected() {
-    var conn = Object.create(null);
-    if (activeNode === null) { return conn; }
-    for (var i = 0; i < edges.length; i++) {
-        var e = edges[i];
-        if (e.source === activeNode) { conn[e.target] = true; }
-        if (e.target === activeNode) { conn[e.source] = true; }
-    }
-    conn[activeNode] = true;
-    return conn;
-}
-
-function drawNodes() {
-    var connected = null;
-    if (activeNode !== null) { connected = buildConnected(); }
-    // 第一轮：画所有圆圈
-    for (var j = 0; j < nodes.length; j++) {
-        var n = nodes[j];
-        if (hideOthers && connected !== null && !connected[n.id]) { continue; }
-        var cx = px(n), cy = py(n);
-        var r = n.size * scale * radiusScale;
-        var fill = C.nodeFill, border = C.nodeBorder, bw = C.bwNormal;
-        if (activeNode !== null) {
-            if (n.id === activeNode) { fill = C.activeFill; border = C.activeBorder; bw = C.bwActive; }
-            else if (connected[n.id]) { fill = C.connFill; border = C.connBorder; bw = C.bwConn; }
-            else { fill = C.dimFill; border = C.dimBorder; bw = C.bwDim; }
-        }
-        ctx.beginPath();
-        ctx.arc(cx, cy, r, 0, 2 * Math.PI);
-        // 先垫一层不透明底色，保证连线永远在圆圈下方（半透明填充时也看不穿）
-        ctx.fillStyle = C.canvasBg;
-        ctx.fill();
-        ctx.fillStyle = fill;
-        ctx.fill();
-        ctx.strokeStyle = border;
-        ctx.lineWidth = bw;
-        ctx.stroke();
-    }
-    // 第二轮：所有名字最后画，保证不被任何圆圈遮挡，信息完整可读
-    var labelFont = Math.max(9, Math.round(12 * radiusScale)) + 'px ' +
-        ((mode === 'ios') ? '-apple-system,"Helvetica Neue","PingFang SC","Microsoft YaHei",sans-serif' : 'Microsoft YaHei, SimHei');
-    ctx.font = labelFont;
-    ctx.fillStyle = C.nodeText;
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'middle';
-    for (var k = 0; k < nodes.length; k++) {
-        var n2 = nodes[k];
-        if (hideOthers && connected !== null && !connected[n2.id]) { continue; }
-        ctx.fillText(n2.id, px(n2), py(n2));
-    }
-}
-
-function drawTooltip() {
-    if (hoverNode === null) { return; }
-    var n = nodeIndex[hoverNode];
-    if (!n) { return; }
-    var t = nodeTotals(hoverNode);
-    var lines = [hoverNode, '连接数：' + n.degree, '流入：' + fmt(t.in), '流出：' + fmt(t.out)];
-    if (mode === 'classic') {
-        ctx.font = '12px Microsoft YaHei, SimHei';
-        var tw = 0;
-        for (var i = 0; i < lines.length; i++) {
-            var wl = ctx.measureText(lines[i]).width;
-            if (wl > tw) { tw = wl; }
-        }
-        var bx = 12, by = 12;
-        ctx.fillStyle = 'rgba(255,255,255,0.95)';
-        ctx.strokeStyle = '#bbb';
-        ctx.lineWidth = 1;
-        ctx.fillRect(bx, by, tw + 16, lines.length * 18 + 10);
-        ctx.strokeRect(bx, by, tw + 16, lines.length * 18 + 10);
-        ctx.fillStyle = '#333';
-        ctx.textAlign = 'left';
-        ctx.textBaseline = 'top';
-        for (var j = 0; j < lines.length; j++) {
-            ctx.fillText(lines[j], bx + 8, by + 8 + j * 18);
-        }
-        return;
-    }
-    // iOS 风格：深色圆角悬浮卡 + 柔和阴影
-    ctx.font = '12px -apple-system, "Helvetica Neue", "PingFang SC", "Microsoft YaHei", sans-serif';
-    var tw2 = 0;
-    for (var m = 0; m < lines.length; m++) {
-        var wm = ctx.measureText(lines[m]).width;
-        if (wm > tw2) { tw2 = wm; }
-    }
-    var bx2 = 12, by2 = 12;
-    var bw2 = tw2 + 20, bh = lines.length * 19 + 14;
-    ctx.save();
-    ctx.shadowColor = 'rgba(0,0,0,0.28)';
-    ctx.shadowBlur = 12;
-    ctx.shadowOffsetY = 4;
-    ctx.fillStyle = C.tooltipBg;
-    roundRect(bx2, by2, bw2, bh, 12);
-    ctx.fill();
-    ctx.restore();
-    ctx.fillStyle = C.tooltipText;
-    ctx.textAlign = 'left';
-    ctx.textBaseline = 'top';
-    for (var p = 0; p < lines.length; p++) {
-        ctx.fillText(lines[p], bx2 + 10, by2 + 7 + p * 19);
-    }
-}
-
-function renderAudit() {
-    var panel = document.getElementById('auditPanel');
-    var body = document.getElementById('auditBody');
-    if (!auditRows || auditRows.length === 0) { panel.style.display = 'none'; return; }
-    var html = '';
-    for (var i = 0; i < auditRows.length; i++) {
-        var r = auditRows[i];
-        html += '<tr><td>' + esc(r.a) + '</td><td>' + esc(r.b) + '</td><td>' + esc(r.a) + ' \u2192 ' + esc(r.b) + '</td>'
-              + '<td>' + fmt(r.spend) + '</td><td>' + fmt(r.recv) + '</td>'
-              + '<td class="diff">' + fmt(r.diff) + '</td><td>' + r.ratio.toFixed(1) + '%</td>'
-              + '<td class="oneside">' + (r.one_sided ? '单侧' : '') + '</td></tr>';
-    }
-    body.innerHTML = html;
-    panel.style.display = 'block';
-}
-
-function getMousePos(e) {
-    var rect = canvas.getBoundingClientRect();
-    return { x: e.clientX - rect.left, y: e.clientY - rect.top };
-}
-
-function nodeAt(mx, my) {
-    var conn = (hideOthers && activeNode !== null) ? buildConnected() : null;
-    for (var i = 0; i < nodes.length; i++) {
-        var n = nodes[i];
-        if (conn !== null && !conn[n.id]) { continue; }
-        var cx = px(n), cy = py(n);
-        var r = n.size * scale * radiusScale + 2;
-        var dx = mx - cx, dy = my - cy;
-        if (dx * dx + dy * dy <= r * r) { return n.id; }
-    }
-    return null;
-}
-
-function setActiveNode(id) {
-    if (activeNode === id) { return; }
-    activeNode = id;
-    uncheckedKeys = Object.create(null);  // 切换节点后恢复默认全选
-    draw();
-}
-
-canvas.addEventListener('click', function(e) {
-    var m = getMousePos(e);
-    var id = nodeAt(m.x, m.y);
-    setActiveNode((id !== null) ? id : null);
-});
-
-canvas.addEventListener('mousemove', function(e) {
-    var m = getMousePos(e);
-    hoverNode = nodeAt(m.x, m.y);
-    draw();
-});
-
-canvas.addEventListener('wheel', function(e) {
-    e.preventDefault();
-    var factor = (e.deltaY < 0) ? 1.1 : 0.9;
-    scale = Math.min(8, Math.max(0.2, scale * factor));
-    draw();
-});
-
-var dragging = false, lastX = 0, lastY = 0;
-canvas.addEventListener('mousedown', function(e) {
-    var m = getMousePos(e);
-    if (nodeAt(m.x, m.y) !== null) { return; }
-    dragging = true; lastX = e.clientX; lastY = e.clientY;
-    canvas.style.cursor = 'grabbing';
-});
-window.addEventListener('mousemove', function(e) {
-    if (!dragging) { return; }
-    panX += e.clientX - lastX;
-    panY += e.clientY - lastY;
-    lastX = e.clientX; lastY = e.clientY;
-    draw();
-});
-window.addEventListener('mouseup', function() {
-    dragging = false; canvas.style.cursor = 'grab';
-});
-
-/* 触屏手势：点选 / 单指平移 / 双指缩放 */
-var touchStartDist = 0;
-canvas.addEventListener('touchstart', function(e) {
-    var t = e.touches;
-    if (t.length === 2) {
-        var dx = t[0].clientX - t[1].clientX, dy = t[0].clientY - t[1].clientY;
-        touchStartDist = Math.sqrt(dx * dx + dy * dy);
-        dragging = false;
-        return;
-    }
-    if (t.length !== 1) { return; }
-    var m = getMousePos(t[0]);
-    var hit = nodeAt(m.x, m.y);
-    if (hit !== null) { setActiveNode(hit); tap(); return; }
-    dragging = true; lastX = t[0].clientX; lastY = t[0].clientY;
-    canvas.style.cursor = 'grabbing';
-}, { passive: true });
-
-canvas.addEventListener('touchmove', function(e) {
-    var t = e.touches;
-    if (t.length === 2) {
-        var dx = t[0].clientX - t[1].clientX, dy = t[0].clientY - t[1].clientY;
-        var d = Math.sqrt(dx * dx + dy * dy);
-        if (touchStartDist > 0) {
-            scale = Math.min(8, Math.max(0.2, scale * (d / touchStartDist)));
-            draw();
-        }
-        touchStartDist = d;
-        if (e.cancelable) { e.preventDefault(); }
-        return;
-    }
-    if (!dragging) { return; }
-    var p = t[0];
-    panX += p.clientX - lastX;
-    panY += p.clientY - lastY;
-    lastX = p.clientX; lastY = p.clientY;
-    draw();
-    if (e.cancelable) { e.preventDefault(); }
-}, { passive: false });
-
-canvas.addEventListener('touchend', function() {
-    dragging = false; touchStartDist = 0;
-    canvas.style.cursor = 'grab';
-});
-
-document.getElementById('cbAmount').addEventListener('change', function() {
-    showAmount = this.checked; draw();
-});
-document.getElementById('cbHideOther').addEventListener('change', function() {
-    hideOthers = this.checked;
-    draw();
-});
-/* 交易详情表：点击表头切换排序（交易类型/客户方/金额，升/降序） */
-function setDetailSort(key) {
-    if (sortKey === key) { sortDir = -sortDir; }
-    else { sortKey = key; sortDir = (key === 'amount') ? -1 : 1; }
-    draw();
-}
-var detailThead = document.getElementById('detailTable').getElementsByTagName('thead')[0];
-detailThead.addEventListener('click', function(e) {
-    var t = e.target;
-    while (t && t.nodeName !== 'TH') { t = t.parentNode; }
-    if (!t || !t.id) { return; }
-    tap();
-    if (t.id === 'thType') { setDetailSort('type'); }
-    else if (t.id === 'thOther') { setDetailSort('other'); }
-    else if (t.id === 'thAmount') { setDetailSort('amount'); }
-});
-detailThead.addEventListener('keydown', function(e) {
-    if (e.key !== 'Enter' && e.key !== ' ') { return; }
-    var t = e.target;
-    if (t && t.nodeName === 'TH') { e.preventDefault(); tap(); t.click(); }
-});
-/* 交易勾选过滤：只显示勾选中的交易连线（可多选，默认全选） */
-document.getElementById('detailBody').addEventListener('change', function(e) {
-    var cb = e.target;
-    if (!cb || cb.className !== 'tx-chk') { return; }
-    var idx = parseInt(cb.getAttribute('data-idx'), 10);
-    var r = detailRows[idx];
-    if (!r) { return; }
-    var key = r.other + '|' + r.type;
-    if (cb.checked) { delete uncheckedKeys[key]; }
-    else { uncheckedKeys[key] = true; }
-    draw();
-});
-document.getElementById('chkAll').addEventListener('change', function() {
-    var on = this.checked;
-    uncheckedKeys = Object.create(null);
-    if (!on) {
-        for (var i = 0; i < detailRows.length; i++) { uncheckedKeys[detailRows[i].other + '|' + detailRows[i].type] = true; }
-    }
-    draw();
-});
-/* 视图切换：资金流向图 / 资金流水分析报告 */
-function switchView(name) {
-    var g = document.getElementById('viewGraph');
-    var r = document.getElementById('viewReport');
-    if (name === 'report') {
-        g.style.display = 'none';
-        r.style.display = 'block';
-    } else {
-        g.style.display = 'block';
-        r.style.display = 'none';
-        resizeCanvas();
-        draw();
-    }
-    window.scrollTo(0, 0);
-}
-document.getElementById('reportEntry').addEventListener('click', function() { tap(); switchView('report'); });
-document.getElementById('backToGraph').addEventListener('click', function() { tap(); switchView('graph'); });
-var titleText = document.getElementById('titleText');
-
-document.getElementById('titleInput').addEventListener('input', function() {
-    var v = this.value || '资金流向图';
-    titleText.textContent = v;
-    document.title = v;
-});
-var settingsPanel = document.getElementById('settingsPanel');
-function openSettings() {
-    settingsPanel.className = 'show';
-    settingsPanel.setAttribute('aria-hidden', 'false');
-}
-function closeSettings() {
-    settingsPanel.className = '';
-    settingsPanel.setAttribute('aria-hidden', 'true');
-}
-document.getElementById('settingsBtn').addEventListener('click', function() {
-    tap();
-    if (settingsPanel.className === 'show') { closeSettings(); } else { openSettings(); }
-});
-document.getElementById('settingsClose').addEventListener('click', function() {
-    tap(); closeSettings();
-});
-settingsPanel.addEventListener('click', function(e) {
-    if (e.target === settingsPanel) { closeSettings(); }
-});
-window.addEventListener('keydown', function(e) {
-    if (e.key === 'Escape' && settingsPanel.className === 'show') { closeSettings(); }
-});
-var segBtns = document.querySelectorAll('.seg-btn');
-for (var q = 0; q < segBtns.length; q++) {
-    (function(btn) {
-        btn.addEventListener('click', function() {
-            tap();
-            applyMode(btn.getAttribute('data-mode'));
-        });
-    })(segBtns[q]);
-}
-document.getElementById('refreshBtn').addEventListener('click', function() {
-    tap();
-    setActiveNode(null);
-    scale = 1; panX = 0; panY = 0;
-    draw();
-});
-document.getElementById('zoomIn').addEventListener('click', function() {
-    tap();
-    scale = Math.min(8, scale * 1.25);
-    draw();
-});
-document.getElementById('zoomOut').addEventListener('click', function() {
-    tap();
-    scale = Math.max(0.2, scale / 1.25);
-    draw();
-});
-
-window.addEventListener('resize', resizeCanvas);
-</script>
-</body>
-</html>'''
-
-
-def generate_html(contract, title='资金流水分析演示图', show_amount=True, hide_other=True,
-                  default_mode='classic', template_file=None, policy_label='以支出方为准',
-                  source_file=''):
-    """生成自包含的交互式 HTML：数据内嵌、离线可用（JS 保持 ES5 兼容旧浏览器）。
-    default_mode：初始界面风格（'classic' 经典布局 / 'ios' iOS 布局），默认经典布局。
-    template_file：可选的外部 HTML 模板路径；缺省使用内嵌的 TEMPLATE_HTML（测试可显式注入）。
-    policy_label：聚合口径的中文说明，写入页面设置与数据一致性面板，便于口径追溯。
-    source_file：源数据文件路径，写入报告元信息（可选）；报告内容已并入输出 HTML。
-    内置两套界面风格，可在设置面板切换：
-      · 经典（原 1.1.7 风格）——顶栏图例、方形按钮、居中设置弹窗、朴素表格；
-      · iOS（Apple iOS 设计语言）——系统字体、毛玻璃、圆角卡片、深浅色自适应、
-        弹簧动画、安全区适配、底部弹窗设置、iOS 开关；iOS 风格下箭头收于圆圈下方不遮挡名字。
-    其余交互：点击高亮、悬浮提示、滚轮缩放、拖拽平移、触屏手势、刷新视图；
-    点击某用户后画布下方以表格展示其交易详情（交易类型/客户方/金额），不点击不显示。
-    表格首列为勾选框（默认全选）：取消勾选即只显示对应交易的连线，可多选；
-    某个方向的交易被取消后，该方向的金额不计入连线与箭头，两向都取消则整条边隐藏。
-    """
-    nodes_json = json.dumps(contract['nodes'], ensure_ascii=False).replace('</', '<\\/')
-    edges_json = json.dumps(contract['edges'], ensure_ascii=False).replace('</', '<\\/')
-    audit = contract.get('audit') or []
-    audit_json = json.dumps(audit, ensure_ascii=False).replace('</', '<\\/')
-    safe_policy = (policy_label.replace('&', '&amp;').replace('<', '&lt;')
-                   .replace('>', '&gt;').replace('"', '&quot;'))
-    if audit:
-        total_diff = sum(r['diff'] for r in audit)
-        audit_line = '发现 {} 处不一致，差异合计 {:.2f} 元'.format(len(audit), total_diff)
-    else:
-        audit_line = '全部一致（无差异）'
-    report_html = build_report_html(contract, policy_label, tol=0.01, source_file=source_file)
-    safe_title = (title.replace('&', '&amp;').replace('<', '&lt;')
-                       .replace('>', '&gt;').replace('"', '&quot;'))
-    amt_checked = ' checked' if show_amount else ''
-    hide_checked = ' checked' if hide_other else ''
-    show_js = 'true' if show_amount else 'false'
-    hide_js = 'true' if hide_other else 'false'
-
-    # 初始界面风格：经典布局（默认）或 iOS 布局
-    if default_mode == 'ios':
-        body_class = 'mode-ios'
-        mode_js = 'ios'
-        seg_classic = 'seg-btn'
-        seg_ios = 'seg-btn active'
-    else:
-        body_class = 'mode-classic'
-        mode_js = 'classic'
-        seg_classic = 'seg-btn active'
-        seg_ios = 'seg-btn'
-
-    tokens = {
-        'NODES_JSON': nodes_json,
-        'EDGES_JSON': edges_json,
-        'SAFE_TITLE': safe_title,
-        'AMT_CHECKED': amt_checked,
-        'HIDE_CHECKED': hide_checked,
-        'SHOW_JS': show_js,
-        'HIDE_JS': hide_js,
-        'BODY_CLASS': body_class,
-        'SEG_CLASSIC': seg_classic,
-        'SEG_IOS': seg_ios,
-        'MODE_JS': mode_js,
-        'POLICY_LABEL': safe_policy,
-        'AUDIT_LINE': audit_line,
-        'AUDIT_JSON': audit_json,
-        'REPORT_HTML': report_html,
-    }
-    if template_file:
-        with open(template_file, encoding='utf-8') as f:
-            html = f.read()
-    else:
-        html = TEMPLATE_HTML
-    # 单遍替换：只扫描模板原文，占位符的值不会再被当作占位符二次替换
-    html = re.sub(r'\{\{([A-Z_]+)\}\}', lambda m: tokens[m.group(1)], html)
-    return html
-
-
-
-
-def analyze_flow(edges, top_n=5, tol=0.01):
-    """对契约边做初步资金流向分析（仅供研究参考，不构成审计结论）。
-    edges：build_contract 产出的边列表（含 amount/back 口径金额）。
-    返回 dict：total / nodes / edge_count / net_in / net_out / top_flows /
-    concentration / top3_in / beneficiary / chain / cycles。
-    """
-    nodes = set()
-    inflow, outflow = {}, {}
-    for e in edges:
-        s, t = e['source'], e['target']
-        nodes.add(s)
-        nodes.add(t)
-        inflow.setdefault(s, 0.0)
-        inflow.setdefault(t, 0.0)
-        outflow.setdefault(s, 0.0)
-        outflow.setdefault(t, 0.0)
-        outflow[s] += e['amount']
-        inflow[t] += e['amount']
-        outflow[t] += e['back']
-        inflow[s] += e['back']
-    nodes = sorted(nodes)
-    total = sum(inflow.values())
-    sig = max(tol, total * 0.001)  # 显著净额阈值：流转总额的 0.1%
-
-    net = {n: inflow[n] - outflow[n] for n in nodes}
-    net_in = sorted([(n, net[n]) for n in nodes if net[n] > sig], key=lambda x: -x[1])
-    net_out = sorted([(n, -net[n]) for n in nodes if net[n] < -sig], key=lambda x: -x[1])
-
-    flows = []
-    for e in edges:
-        if e['amount'] > tol:
-            flows.append((e['amount'], e['source'], e['target']))
-        if e['back'] > tol:
-            flows.append((e['back'], e['target'], e['source']))
-    flows.sort(key=lambda x: -x[0])
-    top_flows = flows[:top_n]
-
-    # 资金集中度：前 3 大归集主体的流入占全网比例
-    conc = 0.0
-    top3_in = []
-    if total > 0:
-        inflow_sorted = sorted(nodes, key=lambda n: -inflow[n])
-        top3_in = inflow_sorted[:3]
-        conc = sum(inflow[n] for n in top3_in) / total
-
-    # 疑似最终收益方：净流入居前且再流出占比低（资金沉淀率高）
-    beneficiary = None
-    cands = []
-    for n in nodes:
-        if inflow[n] > sig:
-            retain = 1.0 - outflow[n] / inflow[n] if inflow[n] > 0 else 0.0
-            cands.append((n, net[n], inflow[n], outflow[n], retain))
-    if cands:
-        cands.sort(key=lambda x: (-x[1], -x[4]))
-        n, netv, inv, outv, retain = cands[0]
-        if netv > sig:
-            beneficiary = {'node': n, 'net': netv, 'inflow': inv, 'outflow': outv, 'retain': retain}
-
-    # 资金传导链：最大净流出方 → 最大净流入方 的最短路径
-    chain = None
-    if net_out and net_in:
-        DG = nx.DiGraph()
-        for e in edges:
-            if e['amount'] > tol:
-                DG.add_edge(e['source'], e['target'])
-            if e['back'] > tol:
-                DG.add_edge(e['target'], e['source'])
-        s, tgt = net_out[0][0], net_in[0][0]
-        try:
-            path = nx.shortest_path(DG, s, tgt)
-            if len(path) >= 2:
-                chain = path
-        except (nx.NetworkXNoPath, nx.NodeNotFound):
-            chain = None
-
-    # 资金回流环（有向简单环：仅保留最短的若干个，防性能问题）
-    cycles = []
-    if len(edges) <= 200:
-        DG = nx.DiGraph()
-        for e in edges:
-            if e['amount'] > tol:
-                DG.add_edge(e['source'], e['target'])
-            if e['back'] > tol:
-                DG.add_edge(e['target'], e['source'])
-        try:
-            scan = 0
-            for c in nx.simple_cycles(DG):
-                scan += 1
-                if scan > 3000:
-                    break
-                if len(c) >= 3:
-                    cycles.append(c)
-                    cycles.sort(key=len)
-                    cycles = cycles[:5]
-                    if len(cycles) == 5 and len(cycles[-1]) == 3:
-                        break
+            from tools.alipay import NOTE, STATUS
         except Exception:
-            cycles = []
+            STATUS, NOTE = '未启用', ''
+        self._card(wrap, '支付宝导入（预留）',
+                   '{}：{}'.format(STATUS, NOTE), None, enabled=False, note='')
 
-    return {
-        'total': total,
-        'nodes': nodes,
-        'edge_count': len(edges),
-        'net_in': net_in,
-        'net_out': net_out,
-        'top_flows': top_flows,
-        'concentration': conc,
-        'top3_in': top3_in,
-        'beneficiary': beneficiary,
-        'chain': chain,
-        'cycles': cycles,
-    }
+    def _card(self, parent, title, subtitle, command, enabled=True, note=''):
+        card = tk.Frame(parent, bg=CARD_BG, highlightbackground='#dcdfe4', highlightthickness=1)
+        card.pack(fill='x', pady=4)
+        left = tk.Frame(card, bg=CARD_BG)
+        left.pack(side='left', fill='both', expand=True, padx=12, pady=10)
+        tk.Label(left, text=title, bg=CARD_BG, font=(FONT_UI, 11, 'bold'), anchor='w').pack(anchor='w')
+        tk.Label(left, text=subtitle, bg=CARD_BG, fg=FG_DIM, font=('', 9), justify='left',
+                 wraplength=520, anchor='w').pack(anchor='w', pady=(3, 0))
+        if note:
+            tk.Label(left, text=note, bg=CARD_BG, fg=FG_NOTE, font=('', 9), justify='left',
+                     wraplength=520, anchor='w').pack(anchor='w', pady=(3, 0))
+        btn = ttk.Button(card, text='进入' if enabled else '未启用', command=command)
+        btn.pack(side='right', padx=12)
+        btn.state(['!disabled'] if enabled else ['disabled'])
+        return card
 
+    def _bottom(self):
+        bar = tk.Frame(self.root, bg=BG)
+        bar.pack(fill='x', padx=18, pady=(4, 12))
+        ttk.Button(bar, text='一键跑全程（A→B→C）…', command=self._pipeline_window).pack(side='left')
+        ttk.Button(bar, text='打开最近输出目录', command=self._open_recent).pack(side='left', padx=6)
+        ttk.Button(bar, text='关于 / 使用说明', command=self._about).pack(side='left')
+        ttk.Button(bar, text='环境自检', command=self._env_report).pack(side='left', padx=6)
+        self.status = tk.Label(self.root, text='就绪', bg=BG, fg=FG_DIM, anchor='w', font=('', 9))
+        self.status.pack(fill='x', padx=18, pady=(0, 10))
 
-def _fmt_amt(v):
-    """金额千分位格式，如 1,234,567.89。"""
-    return '{:,.2f}'.format(v)
+    # ---------- 行为 ----------
+    def _open(self, tid):
+        try:
+            registry.load_tool(tid).open_window(self.root, self.state)
+        except ImportError as e:
+            logger.log('打开功能 {} 失败（缺少依赖）：{}'.format(tid, e))
+            dialogs.show_error(self.root, '缺少运行依赖', deps.advice('原始错误：{}'.format(e)))
+        except Exception as e:
+            trace = traceback.format_exc()
+            logger.log('打开功能 {} 失败：{}'.format(tid, e))
+            logger.log(trace)
+            dialogs.show_error(self.root, '打开失败', e, trace)
 
-
-def _fmt_pct(ratio):
-    """比例（0~1）转百分比文本。"""
-    return '{:.1f}%'.format(ratio * 100)
-
-
-def analysis_sentences(analysis):
-    """生成资金流向参考分析的结论语句（结构化，供 HTML 报告使用）。
-    返回 [(章节标题, [句子...]), ...]；句子为纯文本（已含编号与金额）。
-    """
-    total = analysis['total']
-    nodes = analysis['nodes']
-    if total <= 0 or not nodes:
-        return [('网络概览', ['未检测到有效资金流动（流转总额为 0），暂无法给出流向研判。'])]
-
-    net_in = analysis['net_in']
-    net_out = analysis['net_out']
-    top_flows = analysis['top_flows']
-    conc = analysis['concentration']
-    ben = analysis['beneficiary']
-    chain = analysis['chain']
-    cycles = analysis['cycles']
-    total_in = sum(x[1] for x in net_in)
-    total_out = sum(x[1] for x in net_out)
-    shift_ratio = (total_in + total_out) / 2.0 / total if total > 0 else 0.0
-
-    core = []
-    if net_out:
-        core.append('资金总体上由 {} 等供给端主体流出，向 {} 等归集端主体聚拢；'.format(
-            '、'.join(x[0] for x in net_out[:3]), '、'.join(x[0] for x in net_in[:3])))
-    else:
-        core.append('未发现显著单向净流出主体，资金以双向往来为主；')
-    if top_flows:
-        amt, a, b = top_flows[0]
-        core.append('最大资金通道为 {} → {}（约 {} 元），系网络核心资金动脉；'.format(a, b, _fmt_amt(amt)))
-    if ben:
-        core.append('综合研判，{} 疑似为资金最终收益方（净流入 {} 元，沉淀率 {}）。'.format(
-            ben['node'], _fmt_amt(ben['net']), _fmt_pct(ben['retain'])))
-    else:
-        core.append('暂未识别出明显的单一最终收益方。')
-
-    overview = ['本期资金网络共涉及 {} 个主体、{} 条资金通道，资金流转总额约 {} 元。'.format(
-        len(nodes), analysis['edge_count'], _fmt_amt(total))]
-    if shift_ratio < 0.05:
-        overview.append('网络整体收支大体均衡，资金以双向往来为主，单向净转移规模有限（约占总流转的 {}）。'.format(_fmt_pct(shift_ratio)))
-    elif shift_ratio < 0.20:
-        overview.append('网络存在一定程度的单向净转移：净转移规模约占总流转的 {}，资金呈定向流动特征。'.format(_fmt_pct(shift_ratio)))
-    else:
-        overview.append('网络呈显著单向净转移态势：净转移规模约占总流转的 {}，资金沿明确方向由供给端流向归集端。'.format(_fmt_pct(shift_ratio)))
-
-    if net_out:
-        supply = ['  {}. {}：净流出 {} 元'.format(i, n, _fmt_amt(v)) for i, (n, v) in enumerate(net_out[:5], 1)]
-        supply.append('上述主体合计净流出约 {} 元，构成网络的主要资金供给端。'.format(_fmt_amt(total_out)))
-    else:
-        supply = ['未发现显著净流出主体，各主体收支大体自平衡。']
-
-    if net_in:
-        collect = ['  {}. {}：净流入 {} 元'.format(i, n, _fmt_amt(v)) for i, (n, v) in enumerate(net_in[:5], 1)]
-        collect.append('上述主体合计净流入约 {} 元，为网络的主要资金归集端。'.format(_fmt_amt(total_in)))
-    else:
-        collect = ['未发现显著净流入主体，资金呈均衡分布。']
-
-    if top_flows:
-        channels = ['  {}. {} → {}：{} 元（占流转总额 {}）'.format(
-            i, a, b, _fmt_amt(amt), _fmt_pct(amt / total)) for i, (amt, a, b) in enumerate(top_flows[:5], 1)]
-    else:
-        channels = ['未发现显著大额单笔通道。']
-
-    if total > 0 and analysis['top3_in']:
-        names = '、'.join(analysis['top3_in'])
-        if conc >= 0.5:
-            degree = '头部效应显著，资金高度向少数主体聚集'
-        elif conc >= 0.3:
-            degree = '呈中度集中格局'
+    def _open_recent(self):
+        d = self.state.get('last_out_dir') or paths.find_recent_output_dir(paths.default_output_base())
+        if d and os.path.isdir(d):
+            self.state['last_out_dir'] = d
+            dialogs.open_path(d)
+            self.status.config(text='已打开：{}'.format(d))
         else:
-            degree = '相对分散，未形成明显头部聚集'
-        concentration = ['前 3 大归集主体（{}）合计吸纳全网 {} 的资金，{}。'.format(names, _fmt_pct(conc), degree)]
-    else:
-        concentration = ['数据量有限，暂不评估资金集中度。']
+            dialogs.show_info(self.root, '还没有找到输出目录（形如 输出_20250101_1200）。', '提示')
 
-    if ben:
-        if ben['retain'] >= 0.5:
-            beneficiary = ['综合净流入规模与资金沉淀特征研判，{} 最可能为资金的最终归集方：'.format(ben['node']),
-                           '  净流入 {} 元，再流出仅 {} 元（沉淀率 {}），资金在其处形成显著沉淀，'.format(
-                               _fmt_amt(ben['net']), _fmt_amt(ben['outflow']), _fmt_pct(ben['retain'])),
-                           '  疑似为网络内的终端受益人。']
-        else:
-            beneficiary = ['净流入居前的 {} 资金沉淀率较低（{}），呈“过手”特征，'.format(ben['node'], _fmt_pct(ben['retain'])),
-                           '  更可能为资金中转枢纽而非终端受益人，终端归集方需结合更深层数据进一步识别。']
-    else:
-        beneficiary = ['未发现明显的单一最终归集方（净流入主体资金多呈过手特征或规模相当）。']
+    def _env_report(self):
+        dialogs.show_info(self.root,
+                          deps.diagnostic_text() + '\n套件版本：v{}'.format(__version__),
+                          '环境自检')
 
-    if chain and len(chain) >= 3:
-        chain_lines = ['资金沿「{}」路径逐级传导，'.format(' → '.join(chain)),
-                       '中间环节（{}）兼具收付职能，疑似资金中转枢纽。'.format('、'.join(chain[1:-1]))]
-    elif chain and len(chain) == 2:
-        chain_lines = ['最大净流出方与最大净流入方存在直接资金往来（{} → {}），主体间以直接通道为主。'.format(chain[0], chain[1])]
-    else:
-        chain_lines = ['未发现明显的多级传导链，主体间以直接往来为主。']
+    def _about(self):
+        miss = deps.missing()
+        dep_state = '齐全' if not miss else '缺少 {}（见上方提示的处理办法）'.format('、'.join(miss))
+        msg = ('使用顺序（其中 A/B/C 可一键跑全程）：\n'
+               '  A 导入与清洗：选择微信账单 TenpayTrades.txt（或其所在文件夹），'
+               '生成统一格式的 01_统一流水.tsv 与 01_清洗报告.txt。\n'
+               '  B 多来源合并：选择一份或多份统一格式流水，合并去重后生成 02_合并流水.tsv。\n'
+               '  C 流水总表与透视表：生成 03_流水总表.xlsx / .csv 与 03_数据透视表.xlsx'
+               '（含数据透视表、按主体汇总、人物关系图三张表）。\n'
+               '  D 资金流向分析：生成 04_资金流向图与流水分析报告.html'
+               '（先看资金流向图，再由按钮进入分析报告）。\n\n'
+               '输出：默认写入输入文件所在目录下的「输出_时间戳」文件夹；所有产物集中在同一目录，'
+               '下一步会自动读取，也可以手动选择。\n\n'
+               '数据格式契约：前 4 列固定为「用户方 | 支出/收入 | 客户方 | 金额（元）」，'
+               '其余列（交易时间、交易类型、订单号等）为可选扩展列。\n\n'
+               '免责声明：本工具的分析结果仅供参考，不构成审计结论、鉴定意见或法律意见。\n\n'
+               '{}\n依赖状态：{}\n'
+               '作者：{}    {}'.format(deps.interpreter_info().replace('\n', '；'),
+                                    dep_state, AUTHOR, GITHUB))
+        dialogs.show_info(self.root, msg, '关于与使用说明')
 
-    if cycles:
-        cycle_lines = ['检测到疑似资金回流环（仅列示前 {} 个）：'.format(len(cycles))]
-        cycle_lines.extend('  ' + ' → '.join(c) + ' → ' + c[0] for c in cycles)
-        cycle_lines.append('网络内存在资金循环流动的可能，建议结合业务背景与原始凭证进一步核查。')
-    else:
-        cycle_lines = ['未检测到明显的资金回流闭环。']
+    def _pipeline_window(self):
+        win = tk.Toplevel(self.root)
+        win.title('一键跑全程 · 导入 → 合并 → 总表与透视')
+        win.resizable(False, False)
+        try:
+            win.transient(self.root)
+        except Exception:
+            pass
+        body = ttk.Frame(win, padding=14)
+        body.pack(fill='both', expand=True)
 
-    return [
-        ('核心结论', core),
-        ('网络概览', overview),
-        ('资金供给端（主要净流出方）', supply),
-        ('资金归集端（主要净流入方）', collect),
-        ('大额资金通道', channels),
-        ('资金集中度', concentration),
-        ('疑似最终收益方（初步研判，仅供参考）', beneficiary),
-        ('资金传导链', chain_lines),
-        ('资金回流提示', cycle_lines),
-    ]
+        ttk.Label(body, text='微信账单文件或文件夹（TenpayTrades.txt；可添加多个）',
+                  font=('', 10, 'bold')).pack(anchor='w')
+        listbox = tk.Listbox(body, width=76, height=6, activestyle='none')
+        listbox.pack(fill='both', expand=True, pady=(4, 6))
+        selected = []
 
+        def refresh():
+            listbox.delete(0, 'end')
+            for p in selected:
+                listbox.insert('end', p)
 
+        def add_files():
+            for p in dialogs.ask_open_files(win, '选择微信账单 txt（可多选）', dialogs.FT_WECHAT):
+                if p not in selected:
+                    selected.append(p)
+            refresh()
 
-def _esc_html(s):
-    """HTML 转义（报告内容全部来自数据，需转义防错乱）。"""
-    return (s.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
-            .replace('"', '&quot;'))
+        def add_folder():
+            d = dialogs.ask_directory(win, '选择包含账单的文件夹（递归查找）', self.state.get('last_dir'))
+            if d and d not in selected:
+                selected.append(d)
+                self.state['last_dir'] = d
+                refresh()
 
+        def clear():
+            del selected[:]
+            refresh()
 
-def build_report_html(contract, policy_label, tol=0.01, source_file=''):
-    """生成内嵌于 HTML 的资金流水分析报告片段（样式简洁优雅，内容直接并入输出 HTML）。"""
-    audit = contract.get('audit') or []
-    edges = contract.get('edges') or []
-    analysis = analyze_flow(edges, tol=tol)
-    h = []
+        row = ttk.Frame(body)
+        row.pack(fill='x')
+        ttk.Button(row, text='添加账单文件…', command=add_files).pack(side='left')
+        ttk.Button(row, text='添加文件夹…', command=add_folder).pack(side='left', padx=6)
+        ttk.Button(row, text='清空', command=clear).pack(side='left')
 
-    # ---- 头部 ----
-    h.append('<div class="rep-kicker">FUND FLOW ANALYSIS</div>')
-    h.append('<h1>资金流水分析报告</h1>')
-    h.append('<p class="rep-src">本报告使用工具 <span class="rep-src-tool">drpasserby（WLXC）/FundsAnalysis</span> 生成，结果仅供参考</p>')
-    meta = ['生成时间：' + time.strftime('%Y-%m-%d %H:%M:%S')]
-    if source_file:
-        meta.append('数据文件：' + os.path.basename(source_file))
-    meta.append('聚合口径：' + policy_label)
-    meta.append('差异容差：{} 元'.format(tol))
-    h.append('<div class="rep-meta">' + ''.join('<span>{}</span>'.format(_esc_html(m)) for m in meta) + '</div>')
+        opt = ttk.LabelFrame(body, text='选项', padding=8)
+        opt.pack(fill='x', pady=10)
+        var_self = tk.BooleanVar(value=True)
+        var_dedupe = tk.BooleanVar(value=True)
+        ttk.Checkbutton(opt, text='去除自转自流水（规则 R1）', variable=var_self).pack(anchor='w')
+        ttk.Checkbutton(opt, text='合并时去除重复记录（规则 R5）', variable=var_dedupe).pack(anchor='w')
 
-    # ---- 一、数据一致性检查 ----
-    h.append('<div class="rep-section"><h2>一、数据一致性检查</h2>')
-    total_diff = sum(r['diff'] for r in audit)
-    h.append('<p class="rep-stat">共 {} 对节点，其中 {} 处方向记录不一致，差异合计 {:.2f} 元。</p>'.format(
-        len(edges), len(audit), total_diff))
-    if not audit:
-        h.append('<p><span class="rep-pill rep-ok">✓ 未发现不一致记录，双方记账口径基本吻合</span></p>')
-    else:
-        h.append('<p><span class="rep-pill rep-warn">⚠ 发现 {} 处方向记录不一致，详见下表</span></p>'.format(len(audit)))
-        h.append('<table class="rep-table"><thead><tr>'
-                 '<th>用户方</th><th>客户方</th><th>方向</th><th>支出方金额</th>'
-                 '<th>收入方金额</th><th>差异</th><th>占比</th><th>单侧</th></tr></thead><tbody>')
-        for r in audit:
-            h.append('<tr><td>{}</td><td>{}</td><td>{} → {}</td><td>{:.2f}</td><td>{:.2f}</td>'
-                     '<td class="diff">{:.2f}</td><td>{:.1f}%</td><td class="one">{}</td></tr>'.format(
-                         _esc_html(r['a']), _esc_html(r['b']), _esc_html(r['a']), _esc_html(r['b']),
-                         r['spend'], r['recv'], r['diff'], r['ratio'],
-                         '单侧' if r['one_sided'] else ''))
-        h.append('</tbody></table>')
-    h.append('</div>')
+        ttk.Label(body, text='输出目录（留空则按第一个输入自动新建 输出_时间戳）').pack(anchor='w')
+        var_out = tk.StringVar(value=self.state.get('last_out_dir') or '')
+        row2 = ttk.Frame(body)
+        row2.pack(fill='x', pady=(4, 10))
+        ttk.Entry(row2, textvariable=var_out, width=56).pack(side='left', fill='x', expand=True)
+        ttk.Button(row2, text='浏览…', command=lambda: var_out.set(
+            dialogs.ask_directory(win, '选择输出目录', var_out.get() or None) or var_out.get())
+        ).pack(side='left', padx=(6, 0))
 
-    # ---- 二、资金流向参考分析 ----
-    h.append('<div class="rep-section"><h2>二、资金流向参考分析</h2>')
-    h.append('<p class="rep-sub">本部分结论由程序依据流水数据自动生成，属初步研判、仅供参考。</p>')
-    for title, sts in analysis_sentences(analysis):
-        h.append('<h3>{}</h3>'.format(_esc_html(title)))
-        if title == '核心结论':
-            h.append('<div class="rep-card"><ol>')
-            for st in sts:
-                h.append('<li>{}</li>'.format(_esc_html(st.strip())))
-            h.append('</ol></div>')
-        else:
-            h.append('<ul class="rep-list">')
-            for st in sts:
-                h.append('<li>{}</li>'.format(_esc_html(st.strip())))
-            h.append('</ul>')
-    h.append('</div>')
+        runner = TaskRunner(win)
 
-    # ---- 三、口径与局限说明 ----
-    h.append('<div class="rep-section"><h2>三、口径与局限说明</h2>')
-    notes = [
-        '图上金额 = 按所选聚合口径计算；“以支出方为准”时金额=支出方合计，仅当该方向无支出记录时回退使用收入记录（避免丢边）。',
-        '因数据无交易编号，无法区分“同一笔交易的双方记账差异”与“多笔独立交易”，差异部分请结合原始流水人工核查后再下结论。',
-        '本报告第二节的分析结论由程序依据流水数据自动生成，属初步研判、仅供参考，不构成审计结论、鉴定意见或法律意见；请在结合原始凭证与业务背景后审慎使用。',
-        '如需精确配对，建议在透视表中保留 交易ID/流水号/时间 字段。',
-    ]
-    for i, n in enumerate(notes, 1):
-        h.append('<p class="rep-note">{}. {}</p>'.format(i, _esc_html(n)))
-    h.append('</div>')
+        def start():
+            if not selected:
+                dialogs.show_error(win, '未选择输入', '请先添加微信账单文件或文件夹。')
+                return
+            if runner.busy():
+                return
+            files = [p for p in selected if os.path.isfile(p)]
+            folders = [p for p in selected if os.path.isdir(p)]
+            out_dir = var_out.get().strip().strip('"') or None
+            pw = ProgressWindow(win, title='一键跑全程', text='准备中…')
 
-    # ---- 页脚 ----
-    h.append('<div class="rep-footer">'
-             '<span class="rep-tool">资金流水走向分析工具</span>'
-             '<span class="rep-sep"> · </span>'
-             'Powered by '
-             '<a href="https://github.com/drpasserby" target="_blank" rel="noopener">GitHub@drpasserby(WLXC)</a>'
-             '</div>')
-    return '\n'.join(h)
+            def job(progress):
+                from core import pipeline
+                return pipeline.run_all(files=files, folders=folders, out_dir=out_dir,
+                                        progress=progress, drop_self=var_self.get(),
+                                        dedupe=var_dedupe.get())
 
+            def done(res):
+                self.state['last_out_dir'] = res['out_dir']
+                pv = res['results'].get('pivot')
+                self.state['last_input'] = pv['xlsx'] if pv else res['final']
+                self.status.config(text='最近输出：{}'.format(res['out_dir']))
+                dialogs.ResultDialog(
+                    win, title='一键跑全程完成', summary=res['summary'], items=res['products'],
+                    out_dir=res['out_dir'], log_file=res['log'],
+                    next_label='继续：资金流向分析', on_next=lambda: self._open('flow'))
 
+            def fail(err, trace):
+                logger.log('一键跑全程失败：{}'.format(err))
+                dialogs.show_error(win, '执行失败', err, trace)
+
+            runner.start(job, on_done=done, on_error=fail, progress=pw)
+
+        bottom = ttk.Frame(body)
+        bottom.pack(fill='x')
+        ttk.Button(bottom, text='开始', command=start).pack(side='left')
+        ttk.Button(bottom, text='关闭', command=win.destroy).pack(side='right')
+        dialogs.center(win, self.root)
+        return win
 
 
 def main():
-    """主流程：选择文件与风格 → 读取 → 校验 → 构图 → 生成 HTML。"""
     root = tk.Tk()
-    root.withdraw()  # 隐藏主窗口
-
-    choice = choose_file_and_style(root)
-    if choice is None:
-        return  # 用户取消选择，正常退出
-    file_path, html_style, policy = choice
-
-    try:
-        # 默认读取工作簿第一张表（不再硬编码 Sheet1）
-        df = pd.read_excel(file_path, header=0)
-
-        df, data_messages = validate_and_clean(df)
-        if data_messages:
-            messagebox.showwarning('数据校验提示', '\n'.join(data_messages))
-
-        if df.empty:
-            messagebox.showwarning('数据校验提示', '没有可用的有效数据，程序退出。')
-            return
-
-        G = build_graphs(df, policy=policy)
-        contract = build_contract(G)
-
-        audit = contract.get('audit') or []
-        if audit:
-            total_diff = sum(r['diff'] for r in audit)
-            lines = ['数据一致性检查：发现 {} 处方向记录不一致，差异合计 {:.2f} 元。'
-                     .format(len(audit), total_diff)]
-            for r in audit[:10]:
-                lines.append('{} → {}：支出方 {} / 收入方 {}（差 {}，{:.1f}%）'
-                             .format(r['a'], r['b'], r['spend'], r['recv'], r['diff'], r['ratio']))
-            if len(audit) > 10:
-                lines.append('……共 {} 处，完整明细与参考分析见 资金流向图与流水分析报告.html 的报告页'
-                             .format(len(audit)))
-            messagebox.showwarning('数据一致性提示', '\n'.join(lines))
-
-        html = generate_html(contract, title='资金流水分析演示图', hide_other=True,
-                             default_mode=html_style, policy_label=POLICY_LABELS[policy],
-                             source_file=file_path)
-        with open('资金流向图与流水分析报告.html', 'w', encoding='utf-8') as f:
-            f.write(html)
-        if sys.stdout is not None:
-            print('已生成 资金流向图与流水分析报告.html，双击即可在浏览器中离线使用。')
-    except Exception as e:
-        messagebox.showerror('程序运行出错', '生成过程中出错了：\n{}'.format(e))
-        return
+    SuiteApp(root)
+    root.update_idletasks()
+    dialogs.center(root, None)
+    root.mainloop()
 
 
 if __name__ == '__main__':
