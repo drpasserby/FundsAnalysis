@@ -239,9 +239,6 @@ def open_window(parent, state=None):
                         '整批为空的扩展列会自动省略（例如这份账单没有「交易状态」）；'
                         '文本字段会清掉不可见字符（零宽字符、双向控制符）。',
               wraplength=520, foreground='#555555', justify='left').pack(anchor='w', pady=(4, 0))
-    ttk.Label(opt, text='支付宝账单入口预留：待提供真实样本后启用（本版不解析支付宝）。',
-              wraplength=520, foreground='#8a6d3b', justify='left').pack(anchor='w', pady=(4, 0))
-
     ttk.Label(body, text='输出目录（留空则自动新建 输出_时间戳）').pack(anchor='w')
     var_out = tk.StringVar(value=state.get('last_out_dir') or '')
     row = ttk.Frame(body)
