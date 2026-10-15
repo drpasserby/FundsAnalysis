@@ -77,13 +77,16 @@ def validate_and_clean(raw_df):
             bad_rows.append('第 {} 行：金额“{}”不是有效的非负数字'.format(row_no, amount))
             continue
 
+        # 自环（用户方 == 客户方）：此处只计数、仍保留在中间数据里，真正被忽略发生在
+        # build_graphs()（`if a == c: continue`）——自环不构成通道，因此不会进图。
         if a == c:
             self_loops += 1
 
         cleaned.append([a, direction, c, amount])
 
     if self_loops:
-        messages.append('自环记录 {} 条（已跳过）'.format(self_loops))
+        messages.append('自环记录 {} 条（同一账户的进出：数据保留，构图时忽略、不产生通道）'
+                        .format(self_loops))
     if bad_rows:
         messages.append('发现 {} 处问题，已自动跳过：'.format(len(bad_rows)))
         messages.extend(bad_rows[:20])
