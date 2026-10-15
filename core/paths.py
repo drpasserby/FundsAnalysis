@@ -18,6 +18,9 @@ LOG_NAME = '运行日志.txt'
 # ---- 产物文件名（方案附录 B）----
 P_IMPORT_TSV = '01_统一流水.tsv'
 P_IMPORT_REPORT = '01_清洗报告.txt'
+# 支付宝分支另存一份，避免与微信产物同名互相覆盖（两者契约一致，可一起合并）
+P_IMPORT_TSV_ALIPAY = '01_统一流水_支付宝.tsv'
+P_IMPORT_REPORT_ALIPAY = '01_清洗报告_支付宝.txt'
 P_MERGE_TSV = '02_合并流水.tsv'
 P_PIVOT_XLSX = '03_流水总表.xlsx'
 P_PIVOT_CSV = '03_流水总表.csv'
