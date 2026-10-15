@@ -172,6 +172,7 @@ def open_window(parent, state=None):
             if p not in selected:
                 selected.append(p)
         refresh()
+        _auto_dedupe()
 
     def add_folder():
         d = dialogs.ask_directory(win, '选择包含账单的文件夹（递归查找）', state.get('last_dir'))
@@ -179,6 +180,7 @@ def open_window(parent, state=None):
             selected.append(d)
             state['last_dir'] = d
             refresh()
+            _auto_dedupe()
 
     def clear():
         del selected[:]
@@ -194,6 +196,11 @@ def open_window(parent, state=None):
     opt.pack(fill='x', pady=10)
     var_self = tk.BooleanVar(value=True)
     var_dedupe = tk.BooleanVar(value=False)
+
+    def _auto_dedupe():
+        """选择多个文件/文件夹时自动勾选去重（R5）：同一批流水的多次导出会重复计入。"""
+        if len(selected) > 1 and not var_dedupe.get():
+            var_dedupe.set(True)
     ttk.Checkbutton(opt, text='去除自转自流水（用户方 = 客户方，规则 R1）',
                     variable=var_self).pack(anchor='w')
     ttk.Checkbutton(opt, text='去除重复记录（订单号优先，规则 R5）',

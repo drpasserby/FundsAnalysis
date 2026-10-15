@@ -203,6 +203,21 @@ def _direction(value):
     return ''
 
 
+SAMPLE_LIMIT = 5
+
+
+def _sample_text(user, direction, counterparty, yuan, time_all, mask, limit=SAMPLE_LIMIT):
+    """把被某条规则删掉的前 limit 行拼成单行描述，写进报告供人工复核。"""
+    out = []
+    for i in user.index[mask][:limit]:
+        amt = yuan[i]
+        amt_txt = '（金额空）' if pd.isna(amt) else '{:.2f} 元'.format(float(amt))
+        out.append('{} | {} → {} | {} | {}'.format(
+            time_all[i] or '(无时间)', user[i] or '(空)', counterparty[i] or '(空)',
+            direction[i] or '(空)', amt_txt))
+    return out
+
+
 def empty_stats():
     return {'files_ok': 0, 'files_failed': [], 'rows_raw': 0, 'rows_kept': 0,
             'dropped_direction': 0, 'dropped_self': 0, 'dropped_amount': 0,
@@ -212,6 +227,7 @@ def empty_stats():
             'r4_mode': None, 'r4_type_column': '',
             'recv_rows': 0, 'recv_diff_rows': 0, 'recv_diff_values': {},
             'columns_kept': [], 'empty_columns': [], 'selected_columns': [],
+            'samples': [],
             'fen_total': 0.0, 'fen_kept_total': 0.0, 'yuan_kept_total': 0.0, 'yuan_total': 0.0, 'spend_total': 0.0, 'recv_total': 0.0,
             'subjects': 0, 'missing_columns': [], 'warnings': []}
 
@@ -275,6 +291,7 @@ def build_frame(files, progress=None, drop_self=True, dedupe=False, r4=R4_OFF):
     recv_yuan = fen_to_yuan(pd.to_numeric(
         _pick(raw, KEY_RECV_FEN).str.replace(',', '').str.replace('"', ''), errors='coerce'))
     r4_type_all = _pick_first(raw, R4_TYPE_KEYS)
+    time_all = _pick(raw, KEY_TIME)
 
     keep = pd.Series([True] * len(raw), index=raw.index)
     mask_dir = direction.isin([DIR_SPEND, DIR_RECV])
@@ -283,19 +300,33 @@ def build_frame(files, progress=None, drop_self=True, dedupe=False, r4=R4_OFF):
         bad = loan_type[~mask_dir].replace('', '(空)')
         stats['direction_values'] = dict(
             (str(k), int(v)) for k, v in bad.value_counts().head(8).items())
+        stats['samples'].append(('方向不是支出/收入（R2）', _sample_text(
+            user, direction, counterparty, yuan, time_all, ~mask_dir)))
     keep &= mask_dir
 
     mask_amount = yuan.notna() & (yuan > 0)
-    stats['dropped_amount'] = int((keep & ~mask_amount).sum())
+    drop_amount = keep & ~mask_amount
+    stats['dropped_amount'] = int(drop_amount.sum())
+    if stats['dropped_amount']:
+        stats['samples'].append(('金额缺失或非正（R7）', _sample_text(
+            user, direction, counterparty, yuan, time_all, drop_amount)))
     keep &= mask_amount
 
     mask_empty = (user != '') & (counterparty != '')
-    stats['dropped_empty'] = int((keep & ~mask_empty).sum())
+    drop_empty = keep & ~mask_empty
+    stats['dropped_empty'] = int(drop_empty.sum())
+    if stats['dropped_empty']:
+        stats['samples'].append(('用户方或客户方为空（R7）', _sample_text(
+            user, direction, counterparty, yuan, time_all, drop_empty)))
     keep &= mask_empty
 
     if drop_self:
         mask_self = user != counterparty
-        stats['dropped_self'] = int((keep & ~mask_self).sum())
+        drop_self_rows = keep & ~mask_self
+        stats['dropped_self'] = int(drop_self_rows.sum())
+        if stats['dropped_self']:
+            stats['samples'].append(('自转自：用户方 = 客户方（R1）', _sample_text(
+                user, direction, counterparty, yuan, time_all, drop_self_rows)))
         keep &= mask_self
 
     # R4：只保留转账类（默认关）。财付通账单的「交易用途类型」= 转账/提现/消费/退款/充值/手续费/
@@ -313,7 +344,11 @@ def build_frame(files, progress=None, drop_self=True, dedupe=False, r4=R4_OFF):
             mask_r4 = r4_type_all.isin(TRANSFER_TYPES)
             if r4 == R4_P2P:
                 mask_r4 &= ~memo_text.str.contains('|'.join(WEALTH_KEYWORDS), na=False)
-            stats['dropped_nontransfer'] = int((keep & ~mask_r4).sum())
+            drop_r4 = keep & ~mask_r4
+            stats['dropped_nontransfer'] = int(drop_r4.sum())
+            if stats['dropped_nontransfer']:
+                stats['samples'].append(('非转账类（R4）', _sample_text(
+                    user, direction, counterparty, yuan, time_all, drop_r4)))
             keep &= mask_r4
 
     sel = raw[keep].copy()
@@ -321,7 +356,7 @@ def build_frame(files, progress=None, drop_self=True, dedupe=False, r4=R4_OFF):
     sel[COL_DIR] = direction[keep]
     sel[COL_CP] = counterparty[keep]
     sel[COL_AMOUNT] = yuan[keep].round(2)
-    sel[COL_TIME] = _pick(raw, KEY_TIME)[keep]
+    sel[COL_TIME] = time_all[keep]
     sel[COL_TYPE] = type_all[keep]
     sel[COL_BIZ_TYPE] = biz_type_all[keep]
     sel[COL_STATUS] = _pick(raw, KEY_STATUS)[keep]
@@ -419,6 +454,15 @@ def format_report(stats, files, out_tsv=None):
     lines.append('  去除「重复记录」：{} 行（R5）'.format(stats['dropped_dup']))
     lines.append('  有效数据行：{}'.format(stats['rows_kept']))
     lines.append('  涉及主体：{} 个'.format(stats['subjects']))
+    samples = [s for s in (stats.get('samples') or []) if s[1]]
+    if samples:
+        lines.append('')
+        lines.append('  被删样例（各规则前 {} 条，便于人工复核；不代表全部被删记录）：'
+                     .format(SAMPLE_LIMIT))
+        for label, rows in samples:
+            lines.append('    · {}：'.format(label))
+            for r in rows:
+                lines.append('        ' + r)
     lines.append('')
     lines.append('三、金额与单位换算对账（R6）')
     lines.append('  原始「交易金额(分)」合计：{:.2f} 分'.format(stats['fen_total']))
