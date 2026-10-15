@@ -1,12 +1,11 @@
 # -*- coding: utf-8 -*-
-"""依赖自检：确认必需三方库可用；缺依赖时给出可直接照做的处理办法。
+"""依赖检查：确认必需三方库可用；缺依赖时给出可直接照做的处理办法。
 
 背景：本套件运行时依赖 pandas / networkx / openpyxl。若用没装依赖的解释器启动
 （例如本机的 Python 3.8 线），主界面能正常打开，但一点功能卡片就会报
-`No module named 'pandas'`，容易被误判成程序坏了。启动时先自检一次即可避免。
+`No module named 'pandas'`，容易被误判成程序坏了。功能打开失败时会直接给出处理办法。
 """
 import importlib
-import os
 import sys
 
 # （模块名，用途）
@@ -85,35 +84,4 @@ def advice(extra=''):
     if extra:
         lines.append('')
         lines.append(extra)
-    return '\n'.join(lines)
-
-
-def _version(name):
-    try:
-        mod = importlib.import_module(name)
-        return getattr(mod, '__version__', '')
-    except Exception:
-        return ''
-
-
-def diagnostic_text():
-    """一键自检报告：解释器、工作目录、依赖与版本、结论。用于排障时复制给维护者。"""
-    miss = missing()
-    opt = missing_optional()
-    lines = ['【运行环境自检】', interpreter_info(), '工作目录：{}'.format(os.getcwd()), '',
-             '必需依赖：']
-    for name, desc in REQUIRED:
-        ver = _version(name)
-        lines.append('  {} {}{} —— {}'.format('正常' if _importable(name) else '缺失', name,
-                                            (' ' + ver) if ver else '', desc))
-    lines.append('可选依赖：')
-    for name, desc in OPTIONAL:
-        ver = _version(name)
-        lines.append('  {} {}{} —— {}'.format('正常' if _importable(name) else '缺失', name,
-                                            (' ' + ver) if ver else '', desc))
-    lines.append('')
-    lines.append('结论：{}'.format('依赖齐全，可以正常使用。' if not miss
-                              else '缺少 {}，请按上方提示安装后再试。'.format('、'.join(miss))))
-    if opt:
-        lines.append('提示：可选依赖 {} 缺失不影响 .xlsx/.tsv/.csv 的使用。'.format('、'.join(opt)))
     return '\n'.join(lines)
