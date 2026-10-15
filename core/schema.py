@@ -5,8 +5,13 @@
 扩展列一律放在后面，旧流程忽略它们也不会出错。
 
     用户方 | 支出/收入 | 客户方 | 金额
-    交易时间 | 交易类型 | 交易业务类型 | 交易状态 | 说明 | 订单号 |
+    用户ID | 对手方ID | 交易时间 | 交易类型 | 交易业务类型 | 交易状态 | 说明 | 订单号 |
     对手方接收金额 | 对手侧银行名称 | 来源
+
+其中「用户方 / 客户方」是**姓名**（支付宝从 `用户信息` / `交易对方信息` 里截取），
+「用户ID / 对手方ID」是**原始账号标识**（微信取 `用户ID` / `对手方ID`，支付宝取
+`用户信息` / `交易对方信息` 原文，形如 `2088122934548576(许文仙)`）——
+两个来源因此能在同一组列上对齐，`来源` 列区分数据出处。
 """
 import os
 import re
@@ -21,6 +26,8 @@ COL_AMOUNT = '金额'
 CORE_COLUMNS = [COL_USER, COL_DIR, COL_CP, COL_AMOUNT]
 
 # ---- 扩展列（可选，统一放在必需列之后）----
+COL_USER_ID = '用户ID'            # 原始账号标识：微信「用户ID」/ 支付宝「用户信息」原文
+COL_CP_ID = '对手方ID'            # 原始账号标识：微信「对手方ID」/ 支付宝「交易对方信息」原文
 COL_TIME = '交易时间'
 COL_TYPE = '交易类型'            # 语义类型：转账 / 提现 / 消费 / 退款 / 充值 / 手续费 …
 COL_BIZ_TYPE = '交易业务类型'    # 支付渠道：快捷支付 / 余额支付 / 其它支付（财付通账单里 100% 有值）
@@ -30,10 +37,15 @@ COL_ORDER = '订单号'
 COL_RECV_AMOUNT = '对手方接收金额'  # 元；来自账单「对手方接收金额(分)」，只有「出」方向记录带此字段
 COL_CP_BANK = '对手侧银行名称'
 COL_SOURCE = '来源'
-EXT_COLUMNS = [COL_TIME, COL_TYPE, COL_BIZ_TYPE, COL_STATUS, COL_MEMO, COL_ORDER,
-               COL_RECV_AMOUNT, COL_CP_BANK, COL_SOURCE]
+EXT_COLUMNS = [COL_USER_ID, COL_CP_ID, COL_TIME, COL_TYPE, COL_BIZ_TYPE, COL_STATUS, COL_MEMO,
+               COL_ORDER, COL_RECV_AMOUNT, COL_CP_BANK, COL_SOURCE]
 
 ALL_COLUMNS = CORE_COLUMNS + EXT_COLUMNS
+
+# 账号标识列：微信/支付宝导入时**强制写入**（界面不可取消），保证总表始终带原始账号、可跨来源对齐
+ID_COLUMNS = [COL_USER_ID, COL_CP_ID]
+# 导入时固定保留的列（必需 4 列 + 账号标识 2 列）；空值不参与「整批为空自动省略」
+LOCKED_COLUMNS = CORE_COLUMNS + ID_COLUMNS
 
 # 数值型扩展列（其余扩展列都是文本）
 NUMERIC_EXT_COLUMNS = (COL_RECV_AMOUNT,)

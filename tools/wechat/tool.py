@@ -11,7 +11,8 @@ from tkinter import ttk
 from core import log as logger
 from core import paths
 from core.progress import NullProgress
-from core.schema import ALL_COLUMNS, CORE_COLUMNS, EXT_COLUMNS, COL_AMOUNT, COL_CP, COL_DIR, COL_USER, write_tsv
+from core.schema import (ALL_COLUMNS, CORE_COLUMNS, EXT_COLUMNS, ID_COLUMNS, LOCKED_COLUMNS,
+                         COL_AMOUNT, COL_CP, COL_DIR, COL_USER, write_tsv)
 from tools.wechat import parse
 
 
@@ -97,14 +98,16 @@ def run_import(files=None, folders=None, out_dir=None, progress=None,
     if not df.empty:
         stats['selected_columns'] = list(columns) if columns else []
         if columns:
-            picked = set(columns) | set(CORE_COLUMNS)
+            picked = set(columns) | set(LOCKED_COLUMNS)
             keep = [c for c in ALL_COLUMNS if c in picked]
             dropped = [c for c in ALL_COLUMNS if c not in picked]
             if dropped:
                 logger.log('按列选择丢弃：{}'.format('、'.join(dropped)))
             df = df[keep]
-        # 整批为空的扩展列（例如这份账单没有「交易状态」）自动省略，避免产物里全是空列
-        empty_cols = [c for c in df.columns if c in EXT_COLUMNS and _is_blank_column(df[c])]
+        # 整批为空的扩展列（例如这份账单没有「交易状态」）自动省略，避免产物里全是空列；
+        # 账号标识列（用户ID / 对手方ID）是强制列，即使整批为空也保留，保证契约列位稳定
+        empty_cols = [c for c in df.columns
+                      if c in EXT_COLUMNS and c not in ID_COLUMNS and _is_blank_column(df[c])]
         if empty_cols:
             df = df.drop(columns=empty_cols)
             stats['empty_columns'] = empty_cols
@@ -218,20 +221,21 @@ def open_window(parent, state=None):
 
     def refresh_cols():
         cols = picked['cols']
-        extra = [c for c in cols if c in EXT_COLUMNS]
+        extra = [c for c in cols if c in EXT_COLUMNS and c not in ID_COLUMNS]
         if len(cols) >= len(ALL_COLUMNS):
             lbl_cols.configure(text='将写入：全部 {} 列（{}）'.format(
                 len(ALL_COLUMNS), '、'.join(ALL_COLUMNS)))
         else:
-            lbl_cols.configure(text='将写入：4 个必需列 + {} 个扩展列（{}）'.format(
-                len(extra), '、'.join(extra) if extra else '无'))
+            lbl_cols.configure(text='将写入：4 个必需列 + 2 个账号列（{}）+ {} 个扩展列（{}）'.format(
+                '、'.join(ID_COLUMNS), len(extra), '、'.join(extra) if extra else '无'))
 
     def choose_cols():
         sel = dialogs.ask_columns(
-            win, ALL_COLUMNS, title='选择需要写入的列', locked=CORE_COLUMNS,
+            win, ALL_COLUMNS, title='选择需要写入的列', locked=LOCKED_COLUMNS,
             selected=picked['cols'],
             note='账单原始有 27 列，套件只保留统一格式的前 4 个必需列 + 以下扩展列；'
-                 '不勾选的扩展列不会写进 01_统一流水.tsv，后续总表 / 流向图也不会出现。')
+                 '「用户ID / 对手方ID」是强制保留的账号列（总表靠它与支付宝流水对齐同一账号），'
+                 '不勾选的其它扩展列不会写进 01_统一流水.tsv，后续总表 / 流向图也不会出现。')
         if sel:
             picked['cols'] = [c for c in ALL_COLUMNS if c in set(sel)]
             state['columns'] = picked['cols']

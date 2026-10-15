@@ -18,15 +18,17 @@ import os
 
 import pandas as pd
 
-from core.schema import (ALL_COLUMNS, COL_AMOUNT, COL_BIZ_TYPE, COL_CP, COL_CP_BANK, COL_DIR, COL_MEMO,
-                         COL_ORDER, COL_RECV_AMOUNT, COL_SOURCE, COL_STATUS, COL_TIME, COL_TYPE,
-                         COL_USER, DIR_RECV, DIR_SPEND, EXCEL_EXTS, EXT_COLUMNS, clean_text_value,
-                         fen_to_yuan)
+from core.schema import (ALL_COLUMNS, COL_AMOUNT, COL_BIZ_TYPE, COL_CP, COL_CP_BANK, COL_CP_ID, COL_DIR,
+                         COL_MEMO, COL_ORDER, COL_RECV_AMOUNT, COL_SOURCE, COL_STATUS, COL_TIME, COL_TYPE,
+                         COL_USER, COL_USER_ID, DIR_RECV, DIR_SPEND, EXCEL_EXTS, EXT_COLUMNS, ID_COLUMNS,
+                         clean_text_value, fen_to_yuan)
 
 TARGET_FILENAME = 'TenpayTrades.txt'
 SOURCE_NAME = '微信'
 
 KEY_ACCOUNT = '用户侧账号名称'
+KEY_USER_ID = '用户ID'
+KEY_CP_ID = '对手方ID'
 KEY_LOAN_TYPE = '借贷类型'
 KEY_COUNTERPARTY = '对手侧账户名称'
 KEY_AMOUNT_FEN = '交易金额(分)'
@@ -50,6 +52,10 @@ MEMO_KEYS = (KEY_REMARK, '备注1')
 MEMO2_KEYS = (KEY_PRODUCT, '备注2')
 # R4 判定用的「业务类型」列（财付通账单为 交易用途类型：转账/提现/消费/退款/充值/手续费/信用卡还款）
 R4_TYPE_KEYS = (KEY_USAGE_TYPE, KEY_TRADE_TYPE)
+
+# 原始账号标识列的候选列名（微信侧账单里叫「用户ID / 对手方ID」，不同导出版本可能带后缀）
+USER_ID_KEYS = (KEY_USER_ID, '用户侧账号ID')
+CP_ID_KEYS = (KEY_CP_ID, '对手侧账号ID')
 
 # R4 三档：不过滤 / 只保留「转账」/ 在上一档基础上再排除零钱通申购·赎回等理财类
 R4_OFF = 'off'
@@ -356,6 +362,15 @@ def build_frame(files, progress=None, drop_self=True, dedupe=False, r4=R4_OFF):
     sel[COL_DIR] = direction[keep]
     sel[COL_CP] = counterparty[keep]
     sel[COL_AMOUNT] = yuan[keep].round(2)
+    # 原始账号标识（强制列：保留原样，便于与支付宝侧「用户信息 / 交易对方信息」对齐、也便于回查账单）
+    sel[COL_USER_ID] = _pick_first(raw, USER_ID_KEYS)[keep]
+    sel[COL_CP_ID] = _pick_first(raw, CP_ID_KEYS)[keep]
+    for _col, _label in ((COL_USER_ID, '用户ID / 用户侧账号ID'), (COL_CP_ID, '对手方ID / 对手侧账号ID')):
+        _s = sel[_col]
+        if _col not in raw.columns or bool((_s.isna() | (_s.astype(str) == '')).all()):
+            stats['warnings'].append(
+                '账单里没有可用的「{}」列：「{}」会整列为空（该列是强制保留列，不会自动省略）。'.format(
+                    _label, _col))
     sel[COL_TIME] = time_all[keep]
     sel[COL_TYPE] = type_all[keep]
     sel[COL_BIZ_TYPE] = biz_type_all[keep]
@@ -505,6 +520,8 @@ def format_report(stats, files, out_tsv=None):
     if stats.get('selected_columns'):
         lines.append('  人工选择的列：{}'.format('、'.join(stats['selected_columns'])))
     lines.append('  前 4 列为固定契约：用户方 | 支出/收入 | 客户方 | 金额（元）')
+    lines.append('  强制保留列：{}（账号原始标识，固定写入、界面不可取消；'.format('、'.join(ID_COLUMNS))
+                 + '即使整批为空也不省略，保证与支付宝流水在同一组列上对齐）')
     lines.append('  扩展列：' + '、'.join(EXT_COLUMNS))
     lines.append('  「借贷类型」取值统一映射：出/支出/支/借 → 支出；入/收入/收/贷 → 收入')
     lines.append('  文本字段已清除不可见字符（零宽字符、双向控制符等）')

@@ -26,9 +26,9 @@ import re
 
 import pandas as pd
 
-from core.schema import (ALL_COLUMNS, COL_AMOUNT, COL_BIZ_TYPE, COL_CP, COL_DIR, COL_MEMO, COL_ORDER,
-                         COL_SOURCE, COL_STATUS, COL_TIME, COL_TYPE, COL_USER, DIR_RECV, DIR_SPEND,
-                         EXCEL_EXTS, EXT_COLUMNS, clean_text_value)
+from core.schema import (ALL_COLUMNS, COL_AMOUNT, COL_BIZ_TYPE, COL_CP, COL_CP_ID, COL_DIR, COL_MEMO,
+                         COL_ORDER, COL_SOURCE, COL_STATUS, COL_TIME, COL_TYPE, COL_USER, COL_USER_ID,
+                         DIR_RECV, DIR_SPEND, EXCEL_EXTS, EXT_COLUMNS, ID_COLUMNS, clean_text_value)
 
 SOURCE_NAME = '支付宝'
 
@@ -381,6 +381,16 @@ def build_frame(files, progress=None, drop_self=True, dedupe=False, r4=R4_OFF):
     sel[COL_DIR] = direction[keep]
     sel[COL_CP] = counterparty[keep]
     sel[COL_AMOUNT] = amount[keep]
+    # 原始账号标识：支付宝的「用户信息 / 交易对方信息」（形如 `2088122934548576(许文仙)`）原样保留，
+    # 与微信侧「用户ID / 对手方ID」占同一组列（姓名仍由 用户方 / 客户方 承载）。
+    sel[COL_USER_ID] = _pick(raw, KEY_USER)[keep]
+    sel[COL_CP_ID] = _pick(raw, KEY_COUNTERPARTY)[keep]
+    for _col, _label in ((COL_USER_ID, '用户信息'), (COL_CP_ID, '交易对方信息')):
+        _s = sel[_col]
+        if _col not in raw.columns or bool((_s.isna() | (_s.astype(str) == '')).all()):
+            stats['warnings'].append(
+                '账户明细里没有可用的「{}」列：「{}」会整列为空（该列是强制保留列，不会自动省略）。'.format(
+                    _label, _col))
     sel[COL_TIME] = time_all[keep]
     sel[COL_TYPE] = type_all[keep]
     sel[COL_BIZ_TYPE] = pay_method_all[keep]
@@ -555,6 +565,8 @@ def format_report(stats, files, out_tsv=None):
     if stats.get('selected_columns'):
         lines.append('  人工选择的列：{}'.format('、'.join(stats['selected_columns'])))
     lines.append('  前 4 列为固定契约：用户方 | 支出/收入 | 客户方 | 金额（元）')
+    lines.append('  强制保留列：{}（账号原始标识，固定写入、界面不可取消；'.format('、'.join(ID_COLUMNS))
+                 + '即使整批为空也不省略，保证与微信流水在同一组列上对齐）')
     lines.append('  扩展列：' + '、'.join(EXT_COLUMNS))
     lines.append('  与微信侧的对应关系：交易创建时间→交易时间；类型→交易类型；'
                  '支付方式→交易业务类型；交易状态→交易状态；消费名称（+备注）→说明；交易号→订单号；'
