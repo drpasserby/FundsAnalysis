@@ -9,6 +9,7 @@ from tkinter import filedialog, messagebox, ttk
 FT_FLOW = [('流水表格', '*.xlsx *.xls *.tsv *.txt *.csv'), ('Excel 文件', '*.xlsx *.xls'),
            ('文本流水', '*.tsv *.txt *.csv'), ('所有文件', '*.*')]
 FT_WECHAT = [('微信账单文本', '*.txt'), ('所有文件', '*.*')]
+FT_ALIPAY = [('支付宝账户明细', '*.csv'), ('所有文件', '*.*')]
 FT_XLSX = [('Excel 文件', '*.xlsx *.xls'), ('所有文件', '*.*')]
 FT_TSV = [('统一流水', '*.tsv *.txt *.csv'), ('所有文件', '*.*')]
 
@@ -131,6 +132,174 @@ def ask_columns(parent, columns, title='选择需要写入的列', locked=None, 
         pass
     dlg.wait_window()
     return result['cols'] if result['ok'] else None
+
+
+def ask_people(parent, subjects, relation=None, selected=None, min_amount=0.0,
+               time_from='', time_to='', mode='strict', title='选择关注的人', note=''):
+    """挑选关注对象 + 筛选条件（返回 dict；取消返回 None）。
+
+    subjects：DataFrame[主体, 笔数, 支出合计(元), 收入合计(元), 金额合计(元)]（可为空）
+    relation：DataFrame[姓名, 角色]（功能 C 的「人物关系图」，可为空）
+    返回    ：{'names': [...], 'mode': 'strict'|'expand', 'min_amount': float,
+               'time_from': 'YYYY-MM-DD', 'time_to': 'YYYY-MM-DD'}
+    默认 mode='strict'：只保留**双方都在名单里**的往来（名单 = 勾选的角色成员 ∪ 手工勾选的主体）。
+    """
+    result = {'ok': False}
+
+    subj = []
+    if subjects is not None:
+        try:
+            for r in subjects.itertuples(index=False):
+                name = str(r[0]).strip()
+                if not name:
+                    continue
+                try:
+                    cnt = int(r[1])
+                    amt = float(r[4])
+                except Exception:
+                    cnt, amt = 0, 0.0
+                subj.append((name, '{}（{} 笔 / {:,.2f} 元）'.format(name, cnt, amt)))
+        except Exception:
+            subj = []
+
+    groups = {}
+    if relation is not None:
+        try:
+            for r in relation.itertuples(index=False):
+                nm = str(r[0]).strip()
+                role = str(r[1]).strip() or '(未填角色)'
+                if nm:
+                    groups.setdefault(role, []).append(nm)
+        except Exception:
+            groups = {}
+
+    dlg = tk.Toplevel(parent) if parent is not None else tk.Tk()
+    dlg.title(title)
+    try:
+        dlg.attributes('-topmost', True)
+        dlg.after(300, lambda: dlg.attributes('-topmost', False))
+    except Exception:
+        pass
+
+    if note:
+        ttk.Label(dlg, text=note, wraplength=640, justify='left',
+                  foreground='#555555').pack(fill='x', padx=12, pady=(10, 0))
+
+    ttk.Label(dlg, text='① 按角色快捷选中（角色来自 03_数据透视表.xlsx 的「人物关系图」，可多选）',
+              font=('', 9, 'bold')).pack(anchor='w', padx=12, pady=(10, 2))
+    vars_role = {}
+    if groups:
+        rframe = ttk.Frame(dlg)
+        rframe.pack(fill='x', padx=12)
+        for role, names in groups.items():
+            shown_names = '、'.join(names[:8]) + ('…' if len(names) > 8 else '')
+            v = tk.BooleanVar(value=False)
+            ttk.Checkbutton(rframe, text='{}（{} 人：{}）'.format(role, len(names), shown_names),
+                            variable=v).pack(anchor='w')
+            vars_role[role] = (v, names)
+    else:
+        ttk.Label(dlg, text='（「人物关系图」还没填内容：先在 03_数据透视表.xlsx 里填「姓名 / 角色」，'
+                            '或直接用下面的主体列表挑选）',
+                  wraplength=640, justify='left', foreground='#8a6d3b').pack(anchor='w', padx=12)
+
+    ttk.Label(dlg, text='② 直接在主体里挑（按笔数降序，可多选 Ctrl/Shift，支持搜索）',
+              font=('', 9, 'bold')).pack(anchor='w', padx=12, pady=(10, 2))
+    srow = ttk.Frame(dlg)
+    srow.pack(fill='x', padx=12)
+    ttk.Label(srow, text='搜索：').pack(side='left')
+    var_q = tk.StringVar(value='')
+    ttk.Entry(srow, textvariable=var_q, width=24).pack(side='left')
+    lbl_cnt = ttk.Label(srow, text='')
+    lbl_cnt.pack(side='left', padx=(10, 0))
+
+    lbox = ttk.Frame(dlg)
+    lbox.pack(fill='both', expand=True, padx=12, pady=(4, 0))
+    lst = tk.Listbox(lbox, selectmode='extended', height=11, exportselection=False,
+                     activestyle='none')
+    sb = ttk.Scrollbar(lbox, orient='vertical', command=lst.yview)
+    lst.configure(yscrollcommand=sb.set)
+    lst.pack(side='left', fill='both', expand=True)
+    sb.pack(side='right', fill='y')
+    shown = []
+    preset = set(str(s).strip() for s in (selected or []))
+
+    def refresh(*_a):
+        q = var_q.get().strip()
+        lst.delete(0, 'end')
+        del shown[:]
+        for name, label in subj:
+            if q and q not in name:
+                continue
+            lst.insert('end', label)
+            shown.append(name)
+        for i, name in enumerate(shown):
+            if name in preset:
+                lst.selection_set(i)
+        lbl_cnt.configure(text='共 {} 个主体，当前显示 {} 个'.format(len(subj), len(shown)))
+
+    var_q.trace_add('write', refresh)
+    refresh()
+
+    opt = ttk.LabelFrame(dlg, text='③ 筛选条件')
+    opt.pack(fill='x', padx=12, pady=(10, 0))
+    var_mode = tk.StringVar(value=mode or 'strict')
+    ttk.Radiobutton(opt, text='只看名单内双方的往来（推荐：用户方和客户方都要在名单里）', value='strict',
+                    variable=var_mode).pack(anchor='w', padx=6, pady=(4, 0))
+    ttk.Radiobutton(opt, text='放宽：保留名单内人物的全部往来（含名单外的直接对手）', value='expand',
+                    variable=var_mode).pack(anchor='w', padx=6)
+    row = ttk.Frame(opt)
+    row.pack(fill='x', padx=6, pady=(6, 8))
+    ttk.Label(row, text='金额下限（元）：').pack(side='left')
+    var_min = tk.StringVar(value=('' if not min_amount else '{:g}'.format(float(min_amount))))
+    ttk.Entry(row, textvariable=var_min, width=12).pack(side='left')
+    ttk.Label(row, text='   日期范围：').pack(side='left')
+    var_from = tk.StringVar(value=time_from or '')
+    var_to = tk.StringVar(value=time_to or '')
+    ttk.Entry(row, textvariable=var_from, width=12).pack(side='left')
+    ttk.Label(row, text=' ~ ').pack(side='left')
+    ttk.Entry(row, textvariable=var_to, width=12).pack(side='left')
+    ttk.Label(row, text='（YYYY-MM-DD，可留空）', foreground='#777777').pack(side='left', padx=(6, 0))
+
+    btns = ttk.Frame(dlg)
+    btns.pack(fill='x', padx=12, pady=10)
+
+    def clear_all():
+        for _role, (v, _n) in vars_role.items():
+            v.set(False)
+        lst.selection_clear(0, 'end')
+        var_min.set('')
+        var_from.set('')
+        var_to.set('')
+
+    def on_ok():
+        names = set()
+        for _role, (v, members) in vars_role.items():
+            if v.get():
+                names.update(members)
+        for i in lst.curselection():
+            if 0 <= i < len(shown):
+                names.add(shown[i])
+        try:
+            mn = float(var_min.get().strip() or 0)
+        except ValueError:
+            mn = 0.0
+        result.update({'ok': True, 'names': sorted(names), 'mode': var_mode.get(),
+                       'min_amount': mn, 'time_from': var_from.get().strip(),
+                       'time_to': var_to.get().strip()})
+        dlg.destroy()
+
+    ttk.Button(btns, text='全不选', command=clear_all).pack(side='left')
+    ttk.Button(btns, text='取消', command=dlg.destroy).pack(side='right')
+    ttk.Button(btns, text='确定', command=on_ok).pack(side='right', padx=6)
+    dlg.bind('<Escape>', lambda e: dlg.destroy())
+
+    center(dlg, parent)
+    try:
+        dlg.grab_set()
+    except Exception:
+        pass
+    dlg.wait_window()
+    return result if result.get('ok') else None
 
 
 def center(win, parent=None):
