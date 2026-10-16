@@ -1,33 +1,38 @@
 # -*- coding: utf-8 -*-
 """统一流水格式（canonical schema）—— 套件内部唯一的接口契约。
 
-规范：**前 4 列严格固定**，与主工具 v1.3.2「按列位读取、不依赖表头文字」的逻辑完全兼容；
-扩展列一律放在后面，旧流程忽略它们也不会出错。
+**列顺序固定**（产物、合并结果、总表一律按此顺序；未勾选导入、来源没有、整批为空的列
+直接不写出，其余列的相对顺序不变）：
 
-    用户方 | 支出/收入 | 客户方 | 金额
-    用户ID | 对手方ID | 交易时间 | 交易类型 | 交易业务类型 | 交易状态 | 说明 | 订单号 |
-    对手方接收金额 | 对手侧银行名称 | 来源
+    用户ID | 用户方 | 支出/收入 | 对手方ID | 客户方 | 金额（元） | 交易时间 | 订单号 | 来源
+    交易类型 | 交易业务类型 | 交易状态 | 说明 | 对手方接收金额 | 对手侧银行名称
 
 其中「用户方 / 客户方」是**姓名**（支付宝从 `用户信息` / `交易对方信息` 里截取），
 「用户ID / 对手方ID」是**原始账号标识**（微信取 `用户ID` / `对手方ID`，支付宝取
-`用户信息` / `交易对方信息` 原文，形如 `2088122934548576(许文仙)`）——
-两个来源因此能在同一组列上对齐，`来源` 列区分数据出处。
+`用户信息` / `交易对方信息` 原文，形如 `2088122934548576(许文仙)`）——两个来源因此占同一组列、
+由 `来源` 列区分；两套编号体系不同，跨来源同一人仍按姓名对齐。
+
+读取一律**按列名**（`COL_*` 常量）认列，不依赖列位；只有 v1.3.2 的历史文件
+（前 4 列 = 用户方 | 支出/收入 | 客户方 | 金额）才由 `normalize()` 的列位兜底兼容。
 """
 import os
 import re
 
 import pandas as pd
 
-# ---- 必需列（前 4 列，顺序不可变）----
+# ---- 必需列（语义必需；读取按列名识别，列顺序见 ORDER_MAIN）----
 COL_USER = '用户方'
 COL_DIR = '支出/收入'
 COL_CP = '客户方'
 COL_AMOUNT = '金额'
 CORE_COLUMNS = [COL_USER, COL_DIR, COL_CP, COL_AMOUNT]
 
-# ---- 扩展列（可选，统一放在必需列之后）----
+# ---- 账号标识列：微信/支付宝导入时**强制写入**（界面不可取消），保证总表始终带原始账号 ----
 COL_USER_ID = '用户ID'            # 原始账号标识：微信「用户ID」/ 支付宝「用户信息」原文
 COL_CP_ID = '对手方ID'            # 原始账号标识：微信「对手方ID」/ 支付宝「交易对方信息」原文
+ID_COLUMNS = [COL_USER_ID, COL_CP_ID]
+
+# ---- 其余扩展列 ----
 COL_TIME = '交易时间'
 COL_TYPE = '交易类型'            # 语义类型：转账 / 提现 / 消费 / 退款 / 充值 / 手续费 …
 COL_BIZ_TYPE = '交易业务类型'    # 支付渠道：快捷支付 / 余额支付 / 其它支付（财付通账单里 100% 有值）
@@ -37,15 +42,17 @@ COL_ORDER = '订单号'
 COL_RECV_AMOUNT = '对手方接收金额'  # 元；来自账单「对手方接收金额(分)」，只有「出」方向记录带此字段
 COL_CP_BANK = '对手侧银行名称'
 COL_SOURCE = '来源'
-EXT_COLUMNS = [COL_USER_ID, COL_CP_ID, COL_TIME, COL_TYPE, COL_BIZ_TYPE, COL_STATUS, COL_MEMO,
-               COL_ORDER, COL_RECV_AMOUNT, COL_CP_BANK, COL_SOURCE]
 
-ALL_COLUMNS = CORE_COLUMNS + EXT_COLUMNS
+# ---- 列顺序（用户指定，m04268）：用户ID 用户方 借贷类型 对手方ID 客户方 交易金额
+#      交易时间 订单号 来源 + 其他信息（其余扩展列，保持相对顺序）----
+ORDER_MAIN = [COL_USER_ID, COL_USER, COL_DIR, COL_CP_ID, COL_CP, COL_AMOUNT, COL_TIME, COL_ORDER,
+              COL_SOURCE]
+ORDER_REST = [COL_TYPE, COL_BIZ_TYPE, COL_STATUS, COL_MEMO, COL_RECV_AMOUNT, COL_CP_BANK]
+ALL_COLUMNS = ORDER_MAIN + ORDER_REST
+EXT_COLUMNS = [c for c in ALL_COLUMNS if c not in CORE_COLUMNS]
 
-# 账号标识列：微信/支付宝导入时**强制写入**（界面不可取消），保证总表始终带原始账号、可跨来源对齐
-ID_COLUMNS = [COL_USER_ID, COL_CP_ID]
-# 导入时固定保留的列（必需 4 列 + 账号标识 2 列）；空值不参与「整批为空自动省略」
-LOCKED_COLUMNS = CORE_COLUMNS + ID_COLUMNS
+# 导入时固定保留的列（必需 4 列 + 账号标识 2 列，按产物顺序）；空值不参与「整批为空自动省略」
+LOCKED_COLUMNS = [c for c in ALL_COLUMNS if c in set(CORE_COLUMNS) | set(ID_COLUMNS)]
 
 # 数值型扩展列（其余扩展列都是文本）
 NUMERIC_EXT_COLUMNS = (COL_RECV_AMOUNT,)
@@ -75,7 +82,7 @@ TSV_EXTS = ('.tsv', '.txt')
 CSV_EXTS = ('.csv',)
 SUPPORTED_EXTS = EXCEL_EXTS + TSV_EXTS + CSV_EXTS
 
-DIR_DESC = '用户方 | 支出/收入 | 客户方 | 金额（元）'
+DIR_DESC = '用户方 | 支出/收入 | 客户方 | 金额（元）（4 个必需列，按列名识别）'
 
 
 class SchemaError(ValueError):
@@ -106,8 +113,9 @@ def _clean_amount(series):
 def normalize(df, keep_extra=False):
     """把任意来源的 DataFrame 归一到统一格式。
 
-    - 列名已含 4 个必需列名 → 视为统一格式，直接使用；
-    - 否则**按列位**取前 4 列命名（兼容 v1.3.2 的历史文件）；
+    - 列名已含 4 个必需列名 → 视为统一格式，按 `ALL_COLUMNS` 顺序重排；
+    - 否则**按列位**取前 4 列命名（仅用于 v1.3.2 的历史文件：
+      前 4 列 = 用户方 | 支出/收入 | 客户方 | 金额）；
     - 补齐缺失的扩展列，丢弃 ALL_COLUMNS 之外的列（keep_extra 时保留）；
     - 文本列 strip、金额列转数值。
     """
