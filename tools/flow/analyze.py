@@ -12,6 +12,11 @@ from collections import defaultdict
 import networkx as nx
 import pandas as pd
 
+from core.schema import COL_AMOUNT, COL_CP, COL_DIR, COL_USER, DIR_DESC
+
+# 4 个必需列（按列名认列，不依赖列位；顺序仅用于内部 4 列 DataFrame）
+REQUIRED_COLS = [COL_USER, COL_DIR, COL_CP, COL_AMOUNT]
+
 # ================= 聚合口径 =================
 # 支出/收入记录不一致时，边金额以谁为准（语义详见 build_graphs 文档字符串）
 POLICIES = [
@@ -26,29 +31,36 @@ POLICY_LABELS = dict(POLICIES)
 
 
 # ================= 数据校验与清洗 =================
+def _resolve_columns(raw_df, messages):
+    """认列：统一格式**按列名**认（列顺序变了也不受影响）；
+    列名不全时回退**按列位**（仅用于 v1.3.2 的历史文件：前 4 列 = 用户方|支出/收入|客户方|金额）。"""
+    cols = [str(c) for c in raw_df.columns]
+    if all(c in cols for c in REQUIRED_COLS):
+        return REQUIRED_COLS
+    messages.append('提示：表头与预设不一致（应为 用户方|支出/收入|客户方|金额），'
+                    '已按默认列位读取：第 1 列=用户方，第 2 列=支出/收入，第 3 列=客户方，第 4 列=金额')
+    return cols[:len(REQUIRED_COLS)]
+
+
 def validate_and_clean(raw_df):
     """校验数据格式并清洗：返回 (清洗后的DataFrame, 提示信息列表)。
     列数不足时抛 ValueError（由调用方以弹窗呈现，避免打包后错误信息不可见）。"""
     messages = []
 
-    if raw_df.shape[1] < 4:
+    ncol = 0 if raw_df is None else raw_df.shape[1]
+    if ncol < len(REQUIRED_COLS):
         raise ValueError(
-            '数据列数不足：当前共 {} 列，至少需要 4 列。\n'
-            '请确认数据格式为：用户方 | 支出/收入 | 客户方 | 金额'.format(raw_df.shape[1]))
+            '数据列数不足：当前共 {} 列，至少需要 {} 列。\n'
+            '请确认数据格式为：{}'.format(ncol, len(REQUIRED_COLS), DIR_DESC))
 
-    # 表头软校验（仅提示，不阻断）：列位始终按默认顺序读取，不依赖表头文字。
-    # 若表头与预设不一致，仍按 第 1 列=用户方、第 2 列=支出/收入、第 3 列=客户方、第 4 列=金额 读取。
-    headers = [str(h) for h in raw_df.columns[:4]]
-    if not ('收入' in headers[1] or '支出' in headers[1]) or '金额' not in headers[3]:
-        messages.append('提示：表头与预设不一致（应为 用户方|支出/收入|客户方|金额），'
-                        '已按默认列位读取：第 1 列=用户方，第 2 列=支出/收入，第 3 列=客户方，第 4 列=金额')
+    use = _resolve_columns(raw_df, messages)
 
     cleaned = []
     bad_rows = []
     self_loops = 0
     for i, row in raw_df.iterrows():
         row_no = i + 2  # 表头占第 1 行，数据从第 2 行开始
-        a, direction, c, amount = row.iloc[0], row.iloc[1], row.iloc[2], row.iloc[3]
+        a, direction, c, amount = row[use[0]], row[use[1]], row[use[2]], row[use[3]]
 
         if pd.isna(a) or pd.isna(c) or pd.isna(direction):
             bad_rows.append('第 {} 行：用户方/客户方/方向 存在空值'.format(row_no))
@@ -93,7 +105,7 @@ def validate_and_clean(raw_df):
         if len(bad_rows) > 20:
             messages.append('……共 {} 处，仅显示前 20 处'.format(len(bad_rows)))
 
-    return pd.DataFrame(cleaned, columns=raw_df.columns[:4]), messages
+    return pd.DataFrame(cleaned, columns=REQUIRED_COLS), messages
 
 
 # ================= 图构建（一次遍历，按节点对聚合“不重复”的双向流水） =================
@@ -116,11 +128,14 @@ def build_graphs(df, policy='spend'):
     spend = defaultdict(float)  # spend[(付款方, 收款方)] = 付款方记的“支出”总额
     recv = defaultdict(float)   # recv[(付款方, 收款方)] = 收款方记的“收入”总额（钱从付款方流向收款方）
 
+    # 按列名取值（列顺序变化不影响）；列名不全时回退列位
+    _cols = REQUIRED_COLS if all(c in df.columns for c in REQUIRED_COLS) else list(df.columns[:4])
+
     for _, row in df.iterrows():
-        a = str(row.iloc[0]).strip()
-        direction = str(row.iloc[1]).strip()
-        c = str(row.iloc[2]).strip()
-        amount = float(row.iloc[3])
+        a = str(row[_cols[0]]).strip()
+        direction = str(row[_cols[1]]).strip()
+        c = str(row[_cols[2]]).strip()
+        amount = float(row[_cols[3]])
 
         if a == c:
             continue
