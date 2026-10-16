@@ -76,8 +76,9 @@ def run_import(files=None, folders=None, out_dir=None, progress=None,
                drop_self=True, dedupe=False, columns=None, session=True, r4=None):
     """headless 可调用：解析 → 清洗 → 写统一流水 tsv 与清洗报告。返回结果字典。
 
-    columns：要写入产物的列名列表（None = 全部列）；前 4 个必需列始终保留，
-    顺序始终按统一格式排列（账单里的其余原始列本来就不会进入统一格式）。
+    columns：要写入产物的列名列表（None = 全部列）；必需 4 列与账号 2 列始终保留，
+    产物列顺序固定为 schema.ALL_COLUMNS（用户ID | 用户方 | 支出/收入 | 对手方ID | 客户方 |
+    金额 | 交易时间 | 订单号 | 来源 | 其他信息），未勾选 / 整批为空的列直接不写出。
     r4：非转账类处理档位（parse.R4_OFF / R4_TRANSFER / R4_P2P，None = 不过滤）。
     """
     progress = progress or NullProgress(logger.log)
@@ -221,21 +222,21 @@ def open_window(parent, state=None):
 
     def refresh_cols():
         cols = picked['cols']
-        extra = [c for c in cols if c in EXT_COLUMNS and c not in ID_COLUMNS]
         if len(cols) >= len(ALL_COLUMNS):
-            lbl_cols.configure(text='将写入：全部 {} 列（{}）'.format(
-                len(ALL_COLUMNS), '、'.join(ALL_COLUMNS)))
+            lbl_cols.configure(text='将写入：全部 {} 列'.format(len(ALL_COLUMNS)))
         else:
-            lbl_cols.configure(text='将写入：4 个必需列 + 2 个账号列（{}）+ {} 个扩展列（{}）'.format(
-                '、'.join(ID_COLUMNS), len(extra), '、'.join(extra) if extra else '无'))
+            lbl_cols.configure(text='将写入 {} 列（按此顺序）：{}'.format(
+                len(cols), ' | '.join(cols)))
 
     def choose_cols():
         sel = dialogs.ask_columns(
             win, ALL_COLUMNS, title='选择需要写入的列', locked=LOCKED_COLUMNS,
             selected=picked['cols'],
-            note='账单原始有 27 列，套件只保留统一格式的前 4 个必需列 + 以下扩展列；'
-                 '「用户ID / 对手方ID」是强制保留的账号列（总表靠它与支付宝流水对齐同一账号），'
-                 '不勾选的其它扩展列不会写进 01_统一流水.tsv，后续总表 / 流向图也不会出现。')
+            note='账单原始有 27 列，套件只保留统一格式的必需 4 列 + 账号 2 列 + 以下扩展列；'
+                 '「用户ID / 对手方ID」是强制保留的账号列（总表靠它与支付宝流水对齐同一组列），'
+                 '不勾选的其它扩展列不会写进 01_统一流水.tsv，后续总表 / 流向图也不会出现。'
+                 '产物列顺序固定：用户ID | 用户方 | 支出/收入 | 对手方ID | 客户方 | 金额 | '
+                 '交易时间 | 订单号 | 来源 | 其他信息（未勾选 / 整批为空的列直接不写出）。')
         if sel:
             picked['cols'] = [c for c in ALL_COLUMNS if c in set(sel)]
             state['columns'] = picked['cols']
