@@ -15,10 +15,13 @@
 读取一律**按列名**（`COL_*` 常量）认列，不依赖列位；只有 v1.3.2 的历史文件
 （前 4 列 = 用户方 | 支出/收入 | 客户方 | 金额）才由 `normalize()` 的列位兜底兼容。
 """
+import io
 import os
 import re
 
 import pandas as pd
+
+from core import log as _log
 
 # ---- 必需列（语义必需；读取按列名识别，列顺序见 ORDER_MAIN）----
 COL_USER = '用户方'
@@ -110,6 +113,50 @@ def _clean_amount(series):
     return pd.to_numeric(s, errors='coerce')
 
 
+# ---- 文本编码探测 ----------------------------------------------------------
+# 严格解码：第一个成功的编码就采用，绝不用 errors='replace' 把真实编码错误吞掉
+# （否则 ANSI/GBK 文件会被当成"看起来成功的乱码 UTF-8"读进来，表头与数据全错位）。
+TEXT_ENCODINGS = ('utf-8-sig', 'gb18030', 'utf-16')
+ENCODING_FALLBACK = 'utf-8-replace'
+
+
+def _looks_utf16(raw):
+    """无 BOM 的 UTF-16：ASCII 文本里每隔一个字节就是 0x00（纯中文段更少，阈值放宽）。"""
+    head = raw[:400]
+    if not head:
+        return False
+    return head.count(0) >= max(2, len(head) // 20)
+
+
+def decode_text(raw, path=''):
+    """把字节串解码成文本，返回 (text, 编码名)。
+
+    顺序：BOM 判定（utf-8-sig / utf-16）→ 无 BOM 的 UTF-16 启发 → 严格尝试
+    utf-8-sig → gb18030 → utf-16；全部失败才用 utf-8 + errors='replace' 兜底并告警。
+    """
+    if raw.startswith(b'\xef\xbb\xbf'):
+        return raw.decode('utf-8-sig'), 'utf-8-sig'
+    if raw.startswith(b'\xff\xfe') or raw.startswith(b'\xfe\xff'):
+        return raw.decode('utf-16'), 'utf-16'
+    if _looks_utf16(raw):
+        for enc in ('utf-16-le', 'utf-16-be'):
+            try:
+                text = raw.decode(enc)
+            except UnicodeDecodeError:
+                continue
+            if text.count('\x00') <= max(1, len(text) // 100):
+                return text, enc
+    last_err = None
+    for enc in TEXT_ENCODINGS:
+        try:
+            return raw.decode(enc), enc
+        except UnicodeDecodeError as e:
+            last_err = e
+    _log.log('[WARN] 编码无法识别，已用 utf-8 + errors=replace 兜底（文本可能乱码）：{}'
+             .format(path or '(内存数据)'))
+    return raw.decode('utf-8', errors='replace'), ENCODING_FALLBACK
+
+
 def normalize(df, keep_extra=False):
     """把任意来源的 DataFrame 归一到统一格式。
 
@@ -122,6 +169,15 @@ def normalize(df, keep_extra=False):
     if df is None:
         raise SchemaError('数据为空。')
     df = df.copy()
+    # 防御：重复列名会让 df[col] 返回 DataFrame，pandas 分组即报
+    # InvalidIndexError: Reindexing only valid with uniquely valued Index objects
+    if not df.columns.is_unique:
+        dups = sorted(set(str(c) for c in df.columns if list(df.columns).count(c) > 1))
+        _log.log('[WARN] 检测到重复列名，已按首次出现保留：{}'.format('、'.join(dups)))
+        df = df.loc[:, ~df.columns.duplicated()].copy()
+    if not df.index.is_unique:
+        _log.log('[WARN] 检测到重复索引，已重置')
+        df = df.reset_index(drop=True)
     if df.shape[1] < len(CORE_COLUMNS):
         raise SchemaError('数据列数不足：当前共 {} 列，至少需要 4 列。\n请确认数据格式为：{}'.format(
             df.shape[1], DIR_DESC))
@@ -145,6 +201,9 @@ def normalize(df, keep_extra=False):
     df[COL_AMOUNT] = _clean_amount(df[COL_AMOUNT])
     for c in NUMERIC_EXT_COLUMNS:
         df[c] = _clean_amount(df[c])
+    bad = [str(c) for c in df.columns if '\ufffd' in str(c) or '\ufeff' in str(c)]
+    if bad:
+        _log.log('[WARN] 列名里发现乱码或 BOM 残留字符（常见于文件编码不对）：{}'.format('、'.join(bad)))
     return df.reset_index(drop=True)
 
 
@@ -158,6 +217,7 @@ def read_table(path):
             raw = pd.read_excel(path, header=0)
         except Exception as e:
             raise SchemaError('读取 Excel 失败：{}\n{}'.format(path, e))
+        _log.log('[INFO] 读取 {} (Excel, 行数: {})'.format(path, len(raw) + 1))
     elif ext in CSV_EXTS:
         raw = _read_text(path, ',')
     elif ext in TSV_EXTS:
@@ -165,20 +225,26 @@ def read_table(path):
     else:
         raise SchemaError('不支持的文件类型：{}（支持 {}）'.format(
             ext or '无扩展名', '、'.join(SUPPORTED_EXTS)))
+    _log.log('[INFO] {} → shape={} 列名={}'.format(
+        os.path.basename(path), tuple(raw.shape), list(raw.columns)))
     return normalize(raw)
 
 
 def _read_text(path, sep):
-    """文本表格读取，编码按 utf-8-sig → gbk → utf-8 回退。"""
-    last_err = None
-    for enc in (ENCODING, 'gbk', 'utf-8'):
-        try:
-            return pd.read_csv(path, sep=sep, header=0, dtype=str, encoding=enc)
-        except UnicodeDecodeError as e:
-            last_err = e
-        except Exception as e:
-            raise SchemaError('解析失败：{}\n{}'.format(path, e))
-    raise SchemaError('编码无法识别（已尝试 utf-8-sig / gbk / utf-8）：{}'.format(last_err))
+    """文本表格读取：先做编码探测（严格解码）再把文本交给 pandas 解析。
+
+    编码一律按 utf-8-sig → gb18030 → utf-16 严格尝试，失败才 replace 兜底并告警；
+    不再让 pandas 各编码试错，避免 errors='replace' 把编码错误掩盖成"成功读取"。
+    """
+    with open(path, 'rb') as f:
+        raw_bytes = f.read()
+    text, enc = decode_text(raw_bytes, path)
+    line_count = len(text.splitlines())
+    _log.log('[INFO] 读取 {} (编码: {}, 行数: {})'.format(path, enc, line_count))
+    try:
+        return pd.read_csv(io.StringIO(text), sep=sep, header=0, dtype=str)
+    except Exception as e:
+        raise SchemaError('解析失败：{}\n{}'.format(path, e))
 
 
 def _ensure_dir(path):

@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-资金流水工具套件 v2.0.3
+资金流水工具套件 v2.0.4
 作者：wulvxinchen
 """
 import os

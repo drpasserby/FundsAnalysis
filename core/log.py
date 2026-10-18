@@ -9,6 +9,7 @@ import time
 
 _state = {'path': None, 'fh': None}
 LOG_NAME = '运行日志.txt'
+ERROR_NAME = 'error_log.txt'
 
 
 def init_log(out_dir=None, log_name=LOG_NAME):
@@ -61,3 +62,36 @@ def close_log():
         except Exception:
             pass
     _state['fh'] = None
+
+
+def error_log_path(out_dir):
+    return os.path.join(out_dir, ERROR_NAME) if out_dir else None
+
+
+def write_error_log(out_dir, entries, title='读取/解析失败明细'):
+    """把失败明细写成 error_log.txt（UTF-8），返回路径；没有失败项时返回 None。
+
+    entries 元素可以是 {'file': ..., 'error': ...} 字典，也可以是普通字符串。
+    读取/解析失败的文件不再静默跳过：明细落盘 + 终端日志 + 完成弹窗提示。
+    """
+    if not out_dir or not entries:
+        return None
+    try:
+        os.makedirs(out_dir, exist_ok=True)
+    except Exception:
+        return None
+    path = os.path.join(out_dir, ERROR_NAME)
+    try:
+        with open(path, 'w', encoding='utf-8') as f:
+            f.write('{}（共 {} 项）\n'.format(title, len(entries)))
+            f.write('生成时间：{}\n'.format(time.strftime('%Y-%m-%d %H:%M:%S')))
+            f.write('-' * 56 + '\n')
+            for i, e in enumerate(entries, 1):
+                if isinstance(e, dict):
+                    f.write('{}. 文件：{}\n   原因：{}\n\n'.format(
+                        i, e.get('file', ''), e.get('error', '')))
+                else:
+                    f.write('{}. {}\n'.format(i, e))
+        return path
+    except Exception:
+        return None
