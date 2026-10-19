@@ -18,10 +18,11 @@ import os
 
 import pandas as pd
 
+from core import log as logger
 from core.schema import (ALL_COLUMNS, COL_AMOUNT, COL_BIZ_TYPE, COL_CP, COL_CP_BANK, COL_CP_ID, COL_DIR,
                          COL_MEMO, COL_ORDER, COL_RECV_AMOUNT, COL_SOURCE, COL_STATUS, COL_TIME, COL_TYPE,
                          COL_USER, COL_USER_ID, DIR_RECV, DIR_SPEND, EXCEL_EXTS, EXT_COLUMNS, ID_COLUMNS,
-                         clean_text_value, fen_to_yuan)
+                         clean_text_value, decode_text, fen_to_yuan)
 
 TARGET_FILENAME = 'TenpayTrades.txt'
 SOURCE_NAME = '微信'
@@ -86,15 +87,15 @@ class ParseError(ValueError):
 
 
 def _decode(path):
-    """按 utf-8-sig → gbk → utf-8(replace) 顺序解码（严格解码，避免乱码掩盖真实编码）。"""
+    """读取并解码账单，返回 (文本, 编码名)。
+
+    编码按 utf-8-sig → gb18030 → utf-16 严格尝试，第一个成功的就用；绝不用
+    errors='replace' 静默兜底——那会把 ANSI/GBK 文件当成"看似成功的乱码 UTF-8"
+    读进来，导致表头字段名与数据错位，进而在 pandas 分组阶段报 InvalidIndexError。
+    """
     with open(path, 'rb') as f:
         raw = f.read()
-    for enc in ('utf-8-sig', 'gbk'):
-        try:
-            return raw.decode(enc)
-        except UnicodeDecodeError:
-            continue
-    return raw.decode('utf-8', errors='replace')
+    return decode_text(raw, path)
 
 
 def _looks_like_header(parts):
@@ -111,25 +112,30 @@ def parse_bill_file(path):
     if os.path.splitext(path)[1].lower() in EXCEL_EXTS:
         raise ParseError('微信账单应为文本文件（.txt），当前为 Excel：{}'.format(os.path.basename(path)))
     try:
-        text = _decode(path)
+        text, enc = _decode(path)
     except Exception as e:
-        raise ParseError('读取失败：{}（{}）'.format(path, e))
+        raise ParseError('读取失败（{}）：{}'.format(type(e).__name__, e))
     lines = text.replace('\r\n', '\n').replace('\r', '\n').split('\n')
+    logger.log('[INFO] 读取 {} (编码: {}, 行数: {})'.format(path, enc, len(lines)))
 
+    # 表头定位健壮化：先去掉 BOM / 零宽字符与首尾空白再匹配，
+    # 避免编码转换残留的 \ufeff/\u200b 让表头识别失败。
+    scan = [clean_text_value(ln) for ln in lines[:HEADER_SCAN_LINES]]
     header_idx = None
-    for i, ln in enumerate(lines[:HEADER_SCAN_LINES]):
+    for i, ln in enumerate(scan):
         if KEY_ACCOUNT in ln and '\t' in ln:
             header_idx = i
             break
     if header_idx is None:
-        for i, ln in enumerate(lines[:HEADER_SCAN_LINES]):
+        for i, ln in enumerate(scan):
             if ln.count('\t') >= 2:
                 header_idx = i
                 break
     if header_idx is None:
-        return None, [], 0
+        raise ParseError('未找到表头行（编码={}，已扫描前 {} 行）：文件可能不是微信「账单流水」，'
+                         '或编码/分隔符不对'.format(enc, HEADER_SCAN_LINES))
 
-    header = [h.strip() for h in lines[header_idx].split('\t')]
+    header = [clean_text_value(h) for h in lines[header_idx].split('\t')]
     n = len(header)
     rows = []
     skipped_header_rows = 0
@@ -163,8 +169,9 @@ def find_bill_files(folder):
                 found.append(p)
                 continue
             try:
-                text = _decode(p)
-            except Exception:
+                text, _enc = _decode(p)
+            except Exception as e:
+                logger.log('[WARN] 无法解码，已跳过该文件：{}（{}）'.format(p, e))
                 continue
             head = text[:4000]
             if KEY_ACCOUNT in head and '\t' in head:
@@ -233,7 +240,7 @@ def empty_stats():
             'r4_mode': None, 'r4_type_column': '',
             'recv_rows': 0, 'recv_diff_rows': 0, 'recv_diff_values': {},
             'columns_kept': [], 'empty_columns': [], 'selected_columns': [],
-            'samples': [],
+            'samples': [], 'errors': [],
             'fen_total': 0.0, 'fen_kept_total': 0.0, 'yuan_kept_total': 0.0, 'yuan_total': 0.0, 'spend_total': 0.0, 'recv_total': 0.0,
             'subjects': 0, 'missing_columns': [], 'warnings': []}
 
@@ -253,12 +260,13 @@ def build_frame(files, progress=None, drop_self=True, dedupe=False, r4=R4_OFF):
             header, rows, skipped = parse_bill_file(p)
         except ParseError as e:
             stats['files_failed'].append('{}（{}）'.format(os.path.basename(p), e))
-            continue
-        if header is None:
-            stats['files_failed'].append('{}（未找到表头，已跳过）'.format(os.path.basename(p)))
+            stats['errors'].append({'file': p, 'error': '{}'.format(e)})
+            logger.log('[ERROR] 解析失败：{} —— {}'.format(p, e))
             continue
         if not rows:
             stats['files_failed'].append('{}（无数据行，已跳过）'.format(os.path.basename(p)))
+            stats['errors'].append({'file': p, 'error': '文件里只有表头、没有数据行'})
+            logger.log('[WARN] 只有表头、没有数据行，已跳过：{}'.format(p))
             continue
         f = pd.DataFrame(rows, columns=header)
         frames.append(f)
@@ -271,6 +279,13 @@ def build_frame(files, progress=None, drop_self=True, dedupe=False, r4=R4_OFF):
         return pd.DataFrame(columns=ALL_COLUMNS), stats
 
     raw = pd.concat(frames, ignore_index=True, sort=False)
+    if not raw.columns.is_unique:
+        logger.log('[WARN] 合并后出现重复列名，已按首次出现保留（各文件表头可能不一致）')
+        raw = raw.loc[:, ~raw.columns.duplicated()]
+    if not raw.index.is_unique:
+        logger.log('[WARN] 检测到重复索引，已重置')
+        raw = raw.reset_index(drop=True)
+    logger.log('[INFO] 合并结果 shape={} 列名={}'.format(tuple(raw.shape), list(raw.columns)))
     stats['rows_raw'] = len(raw)
 
     need = [k for k in NEED_KEYS if k not in raw.columns]

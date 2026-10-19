@@ -116,6 +116,11 @@ def run_import(files=None, folders=None, out_dir=None, progress=None,
         stats['columns_kept'] = list(df.columns)
     tsv = paths.product(out_dir, paths.P_IMPORT_TSV)
     report = paths.product(out_dir, paths.P_IMPORT_REPORT)
+    err_log = logger.write_error_log(out_dir, stats.get('errors') or [],
+                                     title='微信账单读取/解析失败明细')
+    if err_log:
+        logger.log('[WARN] {} 个文件未成功解析，明细见 {}'.format(
+            len(stats.get('errors') or []), err_log))
     if df.empty:
         with io.open(report, 'w', encoding='utf-8') as f:
             f.write(parse.format_report(stats, targets))
@@ -139,7 +144,8 @@ def run_import(files=None, folders=None, out_dir=None, progress=None,
                                  stats['files_ok'], len(df), stats['subjects']))
     progress.update(1, 1, '完成')
     return {'out_dir': out_dir, 'tsv': tsv, 'report': report, 'stats': stats,
-            'rows': len(df), 'files': targets, 'log': logger.log_path()}
+            'rows': len(df), 'files': targets, 'log': logger.log_path(),
+            'error_log': err_log}
 
 
 def open_window(parent, state=None):
@@ -306,9 +312,14 @@ def open_window(parent, state=None):
                 summary += ('\n提示：{} 行「交易金额」与账单里的「对手方接收金额」不一致'
                             '（多为微信红包），已按「交易金额」入表，明细见清洗报告第五节。'
                             .format(s['recv_diff_rows']))
+            items = [('统一流水', res['tsv']), ('清洗报告', res['report'])]
+            if res.get('error_log'):
+                summary += ('\n注意：{} 个文件读取/解析失败（未计入本批），明细见「错误明细」。'
+                            .format(len(s.get('errors') or [])))
+                items.append(('错误明细', res['error_log']))
             dialogs.ResultDialog(
                 win, title='导入与清洗完成', summary=summary,
-                items=[('统一流水', res['tsv']), ('清洗报告', res['report'])],
+                items=items,
                 out_dir=res['out_dir'], log_file=res['log'],
                 next_label='下一步：多来源合并', on_next=lambda: _next_step(parent, state, 'merge'))
 
