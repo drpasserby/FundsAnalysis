@@ -26,9 +26,11 @@ import re
 
 import pandas as pd
 
+from core import log as logger
 from core.schema import (ALL_COLUMNS, COL_AMOUNT, COL_BIZ_TYPE, COL_CP, COL_CP_ID, COL_DIR, COL_MEMO,
                          COL_ORDER, COL_SOURCE, COL_STATUS, COL_TIME, COL_TYPE, COL_USER, COL_USER_ID,
-                         DIR_RECV, DIR_SPEND, EXCEL_EXTS, EXT_COLUMNS, ID_COLUMNS, clean_text_value)
+                         DIR_RECV, DIR_SPEND, EXCEL_EXTS, EXT_COLUMNS, ID_COLUMNS, clean_text_value,
+                         decode_text)
 
 SOURCE_NAME = '支付宝'
 
@@ -96,15 +98,14 @@ class ParseError(ValueError):
 
 
 def _decode(path):
-    """按 utf-8-sig → gbk → utf-8(replace) 顺序解码（严格解码，避免乱码掩盖真实编码）。"""
+    """读取并解码账户明细，返回 (文本, 编码名)。
+
+    编码按 utf-8-sig → gb18030 → utf-16 严格尝试，第一个成功的就用；绝不用
+    errors='replace' 静默兜底，避免 ANSI/GBK 文件被当成"看似成功的乱码 UTF-8"读进来。
+    """
     with open(path, 'rb') as f:
         raw = f.read()
-    for enc in ('utf-8-sig', 'gbk'):
-        try:
-            return raw.decode(enc)
-        except UnicodeDecodeError:
-            continue
-    return raw.decode('utf-8', errors='replace')
+    return decode_text(raw, path)
 
 
 def _looks_like_header(cells):
@@ -132,9 +133,10 @@ def parse_bill_file(path):
     if os.path.splitext(path)[1].lower() in EXCEL_EXTS:
         raise ParseError('支付宝账户明细应为 csv 文件，当前为 Excel：{}'.format(os.path.basename(path)))
     try:
-        text = _decode(path)
+        text, enc = _decode(path)
     except Exception as e:
-        raise ParseError('读取失败：{}（{}）'.format(path, e))
+        raise ParseError('读取失败（{}）：{}'.format(type(e).__name__, e))
+    logger.log('[INFO] 读取 {} (编码: {}, 行数: {})'.format(path, enc, len(text.splitlines())))
 
     header = None
     rows = []
@@ -158,7 +160,8 @@ def parse_bill_file(path):
             cells = cells[:n]
         rows.append(cells)
     if header is None:
-        return None, [], 0
+        raise ParseError('未找到表头行（编码={}）：文件可能不是支付宝「账户明细」导出的 csv，'
+                         '或分隔符/编码不对'.format(enc))
     return header, rows, skipped_header_rows
 
 
@@ -174,8 +177,9 @@ def find_bill_files(folder):
                 found.append(p)
                 continue
             try:
-                head = _decode(p)[:HEADER_SCAN_BYTES]
-            except Exception:
+                head = _decode(p)[0][:HEADER_SCAN_BYTES]
+            except Exception as e:
+                logger.log('[WARN] 无法解码，已跳过该文件：{}（{}）'.format(p, e))
                 continue
             if KEY_ORDER in head and KEY_USER in head:
                 found.append(p)
@@ -253,7 +257,7 @@ def empty_stats():
             'amount_total': 0.0, 'amount_kept_total': 0.0, 'amount_final_total': 0.0,
             'spend_total': 0.0, 'recv_total': 0.0,
             'columns_kept': [], 'empty_columns': [], 'selected_columns': [],
-            'samples': [],
+            'samples': [], 'errors': [],
             'subjects': 0, 'missing_columns': [], 'warnings': [],
             'id_rows': 0, 'no_order_rows': 0, 'pay_time_rows': 0, 'dup_order_rows': 0,
             'failed_status_rows': 0}
@@ -275,12 +279,13 @@ def build_frame(files, progress=None, drop_self=True, dedupe=False, r4=R4_OFF):
             header, rows, skipped = parse_bill_file(p)
         except ParseError as e:
             stats['files_failed'].append('{}（{}）'.format(os.path.basename(p), e))
-            continue
-        if header is None:
-            stats['files_failed'].append('{}（未找到表头，已跳过）'.format(os.path.basename(p)))
+            stats['errors'].append({'file': p, 'error': '{}'.format(e)})
+            logger.log('[ERROR] 解析失败：{} —— {}'.format(p, e))
             continue
         if not rows:
             stats['files_failed'].append('{}（无数据行，已跳过）'.format(os.path.basename(p)))
+            stats['errors'].append({'file': p, 'error': '文件里只有表头、没有数据行'})
+            logger.log('[WARN] 只有表头、没有数据行，已跳过：{}'.format(p))
             continue
         frames.append(pd.DataFrame(rows, columns=header))
         stats['files_ok'] += 1
@@ -292,6 +297,13 @@ def build_frame(files, progress=None, drop_self=True, dedupe=False, r4=R4_OFF):
         return pd.DataFrame(columns=ALL_COLUMNS), stats
 
     raw = pd.concat(frames, ignore_index=True, sort=False)
+    if not raw.columns.is_unique:
+        logger.log('[WARN] 合并后出现重复列名，已按首次出现保留（各文件表头可能不一致）')
+        raw = raw.loc[:, ~raw.columns.duplicated()]
+    if not raw.index.is_unique:
+        logger.log('[WARN] 检测到重复索引，已重置')
+        raw = raw.reset_index(drop=True)
+    logger.log('[INFO] 合并结果 shape={} 列名={}'.format(tuple(raw.shape), list(raw.columns)))
     stats['rows_raw'] = len(raw)
 
     need = [k for k in NEED_KEYS if k not in raw.columns]

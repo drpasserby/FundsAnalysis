@@ -118,6 +118,11 @@ def run_import(files=None, folders=None, out_dir=None, progress=None,
         stats['columns_kept'] = list(df.columns)
     tsv = paths.product(out_dir, paths.P_IMPORT_TSV_ALIPAY)
     report = paths.product(out_dir, paths.P_IMPORT_REPORT_ALIPAY)
+    err_log = logger.write_error_log(out_dir, stats.get('errors') or [],
+                                     title='支付宝账户明细读取/解析失败明细')
+    if err_log:
+        logger.log('[WARN] {} 个文件未成功解析，明细见 {}'.format(
+            len(stats.get('errors') or []), err_log))
     if df.empty:
         with io.open(report, 'w', encoding='utf-8') as f:
             f.write(parse.format_report(stats, targets))
@@ -142,7 +147,8 @@ def run_import(files=None, folders=None, out_dir=None, progress=None,
                                  stats['files_ok'], len(df), stats['subjects']))
     progress.update(1, 1, '完成')
     return {'out_dir': out_dir, 'tsv': tsv, 'report': report, 'stats': stats,
-            'rows': len(df), 'files': targets, 'log': logger.log_path()}
+            'rows': len(df), 'files': targets, 'log': logger.log_path(),
+            'error_log': err_log}
 
 
 def open_window(parent, state=None):
