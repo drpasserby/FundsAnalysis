@@ -191,6 +191,13 @@ def run_merge(inputs=None, folders=None, out_dir=None, progress=None, dedupe=Tru
 
     progress.set_indeterminate('正在合并与去重…')
     df = pd.concat(frames, ignore_index=True)
+    if not df.columns.is_unique:
+        logger.log('[WARN] 合并后出现重复列名，已按首次出现保留')
+        df = df.loc[:, ~df.columns.duplicated()]
+    if not df.index.is_unique:
+        logger.log('[WARN] 检测到重复索引，已重置')
+        df = df.reset_index(drop=True)
+    logger.log('[INFO] 合并结果 shape={} 列名={}'.format(tuple(df.shape), list(df.columns)))
     rows_raw = len(df)
     conflicts = detect_conflicts(df)
     dropped_dup = 0

@@ -47,6 +47,14 @@ def validate_and_clean(raw_df):
     列数不足时抛 ValueError（由调用方以弹窗呈现，避免打包后错误信息不可见）。"""
     messages = []
 
+    if raw_df is not None:
+        if not raw_df.columns.is_unique:
+            messages.append('警告：输入里存在重复列名，已按首次出现保留')
+            raw_df = raw_df.loc[:, ~raw_df.columns.duplicated()]
+        if not raw_df.index.is_unique:
+            messages.append('警告：检测到重复索引，已重置')
+            raw_df = raw_df.reset_index(drop=True)
+
     ncol = 0 if raw_df is None else raw_df.shape[1]
     if ncol < len(REQUIRED_COLS):
         raise ValueError(

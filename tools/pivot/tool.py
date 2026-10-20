@@ -42,6 +42,22 @@ def role_formula(cell, relation_sheet=SHEET_RELATION):
     return '=VLOOKUP({0},{1}!B:C,2,0)'.format(cell, relation_sheet)
 
 
+def _ensure_clean_index(df):
+    """分组前的防御：索引唯一 + 列名唯一。
+
+    重复列名会让 `df[col]` 返回 DataFrame，pandas 分组随即报
+    `InvalidIndexError: Reindexing only valid with uniquely valued Index objects`；
+    重复索引则在 reindex 类操作上报同样的错。
+    """
+    if not df.columns.is_unique:
+        logger.log('[WARN] 检测到重复列名，已按首次出现保留')
+        df = df.loc[:, ~df.columns.duplicated()]
+    if not df.index.is_unique:
+        logger.log('[WARN] 检测到重复索引，已重置')
+        df = df.reset_index(drop=True)
+    return df
+
+
 def build_pivot(df, relation_sheet=SHEET_RELATION):
     """按 用户方 / 支出·收入 / 客户方 汇总金额与笔数，并写入角色 VLOOKUP 公式。
 
@@ -49,6 +65,7 @@ def build_pivot(df, relation_sheet=SHEET_RELATION):
     对手侧角色 | 求和项:交易金额(分)，因此 A 列、D 列是姓名，可直接沿用
     `=VLOOKUP(A6,人物关系图!B:C,2,0)` 这类写法。
     """
+    df = _ensure_clean_index(df)
     g = df.groupby([COL_USER, COL_DIR, COL_CP], as_index=False)[COL_AMOUNT].agg(['sum', 'count'])
     g.columns = [COL_USER, COL_DIR, COL_CP, AMOUNT_HEAD, COUNT_HEAD]
     g[AMOUNT_HEAD] = g[AMOUNT_HEAD].round(2)
@@ -64,6 +81,7 @@ def build_pivot(df, relation_sheet=SHEET_RELATION):
 
 def build_summary(df):
     """按主体汇总：支出/收入合计与笔数、净流入（按净流入降序）。"""
+    df = _ensure_clean_index(df)
     subjects = sorted(set(df[COL_USER].astype(str)) | set(df[COL_CP].astype(str)))
     spend = df[df[COL_DIR] == DIR_SPEND].groupby(COL_USER)[COL_AMOUNT].agg(['sum', 'count'])
     recv = df[df[COL_DIR] == DIR_RECV].groupby(COL_USER)[COL_AMOUNT].agg(['sum', 'count'])
@@ -101,6 +119,9 @@ def run_pivot(input_path, out_dir=None, progress=None, session=True):
 
     progress.set_indeterminate('正在读取流水…')
     df = read_table(input_path)
+    df = _ensure_clean_index(df)
+    logger.log('[INFO] 输入 {}：shape={} 列名={}'.format(
+        os.path.basename(input_path), tuple(df.shape), list(df.columns)))
     if df.empty:
         raise ValueError('输入文件没有数据行：{}'.format(input_path))
     logger.log('读取 {} 行'.format(len(df)))
