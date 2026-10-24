@@ -18,8 +18,8 @@ from core import paths
 from core.clean import dedupe_frame, sort_by_time
 from core.progress import NullProgress
 from core.schema import (COL_AMOUNT, COL_CP, COL_DIR, COL_ORDER, COL_SOURCE, COL_USER,
-                         CSV_EXTS, DIR_RECV, DIR_SPEND, EXCEL_EXTS, TSV_EXTS,
-                         read_table, write_tsv)
+                         CSV_EXTS, DIR_RECV, DIR_SPEND, EXCEL_EXTS, HINT_COLUMNS, TSV_EXTS,
+                         blank_columns, read_table, write_tsv)
 
 TABLE_EXTS = set(EXCEL_EXTS) | set(TSV_EXTS) | set(CSV_EXTS)
 
@@ -119,6 +119,13 @@ def format_report(stats, tables, skipped, conflicts, out_tsv=None):
         lines.append('  「来源」分布：' + '、'.join(
             '{} {} 行'.format(k, v) for k, v in counts.items()))
     lines.append('  合并后按交易时间稳定排序')
+    empty_cols = stats.get('empty_columns') or []
+    if empty_cols:
+        lines.append('')
+        lines.append('  注意：合并后这些列整列为空：{}'.format('、'.join(empty_cols)))
+        lines.append('        说明有输入流水缺这些列（多半是功能 A 导入时没勾选），'
+                     '总表里对应列也会空白；')
+        lines.append('        需要的话请回功能 A 重新导入并勾选这些列，再重做合并与总表。')
     lines.append('')
     lines.append('三、订单号一致性检查（多来源合并后的冲突提示）')
     if not conflicts or not conflicts.get('groups'):
@@ -198,6 +205,11 @@ def run_merge(inputs=None, folders=None, out_dir=None, progress=None, dedupe=Tru
         logger.log('[WARN] 检测到重复索引，已重置')
         df = df.reset_index(drop=True)
     logger.log('[INFO] 合并结果 shape={} 列名={}'.format(tuple(df.shape), list(df.columns)))
+    empty_hint = blank_columns(df, HINT_COLUMNS)
+    if empty_hint:
+        logger.log('[WARN] 合并结果里这些列整列为空：{}'.format('、'.join(empty_hint)))
+        logger.log('[WARN] 说明有输入流水缺这些列（多半是功能 A 导入时没勾选），'
+                   '合并流水与总表里对应列都会是空白；需要的话请回功能 A 重新导入并勾选后重做合并。')
     rows_raw = len(df)
     conflicts = detect_conflicts(df)
     dropped_dup = 0
@@ -213,7 +225,8 @@ def run_merge(inputs=None, folders=None, out_dir=None, progress=None, dedupe=Tru
     report = paths.product(out_dir, paths.P_MERGE_REPORT)
     stats = {'files_ok': len(frames), 'files_failed': len(skipped), 'rows_raw': rows_raw,
              'rows_kept': len(df), 'dropped_dup': dropped_dup, 'sources': sources,
-             'source_counts': source_counts, 'conflicts': conflicts}
+             'source_counts': source_counts, 'conflicts': conflicts,
+             'empty_columns': empty_hint}
     paths.backup_if_exists(tsv)
     write_tsv(df, tsv)
     paths.backup_if_exists(report)
@@ -337,6 +350,10 @@ def open_window(parent, state=None):
                           '主体不一致 {} 组），详见「合并说明」。').format(
                               cf['groups'], cf['amount_mismatch'], cf['same_dir_dup'],
                               cf['party_mismatch'])
+            if s.get('empty_columns'):
+                extra += '\n注意：输入流水缺「{}」，合并结果里这些列整列为空；' \
+                         '多半是功能 A 导入时没勾选，请回功能 A 重新导入并勾选后再合并。'.format(
+                             '、'.join(s['empty_columns']))
             dialogs.ResultDialog(
                 win, title='合并完成',
                 summary='读取 {} 个文件 / {} 行，去重 {} 行，合并结果 {} 行，来源 {} 个。{}'.format(

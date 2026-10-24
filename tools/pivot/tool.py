@@ -21,8 +21,8 @@ from core import log as logger
 from core import paths
 from core.excel_style import style_worksheet
 from core.progress import NullProgress
-from core.schema import (COL_AMOUNT, COL_CP, COL_DIR, COL_USER, DIR_RECV, DIR_SPEND, read_table,
-                         write_csv, write_xlsx)
+from core.schema import (COL_AMOUNT, COL_CP, COL_DIR, COL_USER, DIR_RECV, DIR_SPEND, HINT_COLUMNS,
+                         blank_columns, read_table, write_csv, write_xlsx)
 
 SHEET_DETAIL = '流水总表'
 SHEET_PIVOT = '数据透视表'
@@ -126,6 +126,12 @@ def run_pivot(input_path, out_dir=None, progress=None, session=True):
         raise ValueError('输入文件没有数据行：{}'.format(input_path))
     logger.log('读取 {} 行'.format(len(df)))
 
+    empty_hint = blank_columns(df, HINT_COLUMNS)
+    if empty_hint:
+        logger.log('[WARN] 输入里这些列整列为空：{}'.format('、'.join(empty_hint)))
+        logger.log('[WARN] 多半是导入时没有勾选这些列（功能 A 的「选择需要写入的列」），'
+                   '总表里对应列也会空白；需要的话请回功能 A 重新导入并勾选，再走一次合并与总表。')
+
     progress.set_indeterminate('正在汇总…')
     pivot = build_pivot(df)
     summary = build_summary(df)
@@ -158,7 +164,8 @@ def run_pivot(input_path, out_dir=None, progress=None, session=True):
                                           os.path.basename(pvx)))
 
     stats = {'rows': len(df), 'subjects': subjects, 'pivot_rows': len(pivot),
-             'channels': len(pivot[[COL_USER, COL_CP]].drop_duplicates())}
+             'channels': len(pivot[[COL_USER, COL_CP]].drop_duplicates()),
+             'empty_columns': empty_hint}
     if session:
         paths.update_session(out_dir, 'pivot', 'done',
                              outputs={'xlsx': xlsx, 'csv': csv, 'pivot': pvx},
@@ -249,12 +256,17 @@ def open_window(parent, state=None):
 
         def done(res):
             s = res['stats']
+            summary = ('共 {} 行明细，{} 个主体，{} 条通道。\n'
+                       '「数据透视表」的 B 列（用户侧角色）与 E 列（对手侧角色）已写入 '
+                       'VLOOKUP 公式；打开「人物关系图」填好「姓名 / 角色」后角色自动带出。').format(
+                           s['rows'], s['subjects'], s['channels'])
+            if s.get('empty_columns'):
+                summary += '\n注意：输入文件里「{}」整列为空，总表对应列也会是空白；' \
+                           '多半是导入时没勾选这些列，请回功能 A 重新导入并勾选后再走一遍。'.format(
+                               '、'.join(s['empty_columns']))
             dialogs.ResultDialog(
                 win, title='总表与透视表完成',
-                summary='共 {} 行明细，{} 个主体，{} 条通道。\n'
-                        '「数据透视表」的 B 列（用户侧角色）与 E 列（对手侧角色）已写入 '
-                        'VLOOKUP 公式；打开「人物关系图」填好「姓名 / 角色」后角色自动带出。'.format(
-                            s['rows'], s['subjects'], s['channels']),
+                summary=summary,
                 items=[('流水总表 (xlsx)', res['xlsx']), ('流水总表 (csv)', res['csv']),
                        ('数据透视表', res['pivot_xlsx'])],
                 out_dir=res['out_dir'], log_file=res['log'],

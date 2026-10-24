@@ -74,6 +74,12 @@ SHEET_MAIN = '流水总表'
 INVISIBLE_RE = r'[\u200b-\u200f\u202a-\u202e\u2060-\u2064\u2066-\u2069\ufeff\u00a0]'
 
 
+def _norm_col_name(name):
+    """列名规范化：去掉 BOM/零宽等不可见字符、全角空格转半角、去首尾空白。"""
+    s = re.sub(INVISIBLE_RE, '', str(name)).replace('\u3000', ' ')
+    return s.strip()
+
+
 def clean_text_value(value):
     """单值文本清洗：去掉不可见字符后去首尾空白（解析层逐字段使用）。"""
     if value is None:
@@ -111,6 +117,34 @@ def _clean_amount(series):
     for ch in (',', '"', "'", '¥', '￥', ' '):
         s = s.str.replace(ch, '')
     return pd.to_numeric(s, errors='coerce')
+
+
+# 用户最容易「以为勾了、其实导入时没写出来」的列：整列为空时给一句提示
+HINT_COLUMNS = (COL_TIME, COL_ORDER, COL_SOURCE, COL_TYPE, COL_MEMO)
+
+
+def blank_columns(df, columns=None):
+    """返回整列空白（含缺列）的列名。
+
+    用途：导入时少勾了几列，`normalize()` 会把缺失列补成空串，后续步骤看到的
+    就是「列头在、值全空」（合并流水/总表里那一列整列空白）。这里把情况说清楚，
+    提示用户回功能 A 重新导入并勾选这些列。
+    """
+    cols = list(columns) if columns else list(df.columns)
+    out = []
+    for c in cols:
+        if c not in df.columns:
+            out.append(c)
+            continue
+        col = df[c]
+        if col.isna().all():
+            out.append(c)
+            continue
+        # read_csv 会把空字段读成 NaN，所以「空」要同时认 NaN 与空串
+        s = col.astype(str).str.strip()
+        if s.isin(['', 'nan', 'NaN', 'None']).all():
+            out.append(c)
+    return out
 
 
 # ---- 文本编码探测 ----------------------------------------------------------
@@ -182,6 +216,19 @@ def normalize(df, keep_extra=False):
         raise SchemaError('数据列数不足：当前共 {} 列，至少需要 4 列。\n请确认数据格式为：{}'.format(
             df.shape[1], DIR_DESC))
     cols = list(df.columns)
+    # 列名归一：先去掉 BOM/零宽字符/首尾空白/全角空格再和标准列名比对。
+    # 否则「交易时间 」（尾部多一个空格）这种列名会被当成未知列直接丢掉，
+    # 而标准列又被补成空列 —— 表现就是「源文件明明有时间列，总表里却是空白」。
+    rename = {}
+    for c in df.columns:
+        std = _norm_col_name(c)
+        if std != c and std in set(ALL_COLUMNS) and std not in df.columns:
+            rename[c] = std
+    if rename:
+        _log.log('[WARN] 列名含不可见字符或多余空白，已按标准列名归一：{}'.format(
+            '、'.join('{} → {}'.format(k, v) for k, v in rename.items())))
+        df = df.rename(columns=rename)
+        cols = list(df.columns)
     if not all(c in cols for c in CORE_COLUMNS):
         rename = {}
         for i, c in enumerate(cols[:len(CORE_COLUMNS)]):
@@ -191,6 +238,11 @@ def normalize(df, keep_extra=False):
     extras = []
     if keep_extra:
         extras = [c for c in df.columns if c not in ALL_COLUMNS]
+    else:
+        unknown = [str(c) for c in df.columns if c not in ALL_COLUMNS]
+        if unknown:
+            _log.log('[WARN] 丢弃无法识别的列（列名与标准列名不一致）：{}'.format(
+                '、'.join(unknown)))
     for c in ALL_COLUMNS:
         if c not in df.columns:
             df[c] = ''
