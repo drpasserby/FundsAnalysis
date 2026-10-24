@@ -5,6 +5,6 @@
 """
 
 APP_NAME = '资金流水工具套件'
-__version__ = '2.0.4'
+__version__ = '2.0.5'
 AUTHOR = 'drpasserby（WLXC）'
 GITHUB = 'https://github.com/drpasserby'
