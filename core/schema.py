@@ -13,7 +13,8 @@
 由 `来源` 列区分；两套编号体系不同，跨来源同一人仍按姓名对齐。
 
 读取一律**按列名**（`COL_*` 常量）认列，不依赖列位；只有 v1.3.2 的历史文件
-（前 4 列 = 用户方 | 支出/收入 | 客户方 | 金额）才由 `normalize()` 的列位兜底兼容。
+（恰好 4 列、列名全认不出、列位 = 用户方 | 支出/收入 | 客户方 | 金额）才由
+`normalize()` 的列位兜底兼容，其余缺列情况直接报 `SchemaError`，避免静默错列。
 """
 import io
 import os
@@ -194,9 +195,11 @@ def decode_text(raw, path=''):
 def normalize(df, keep_extra=False):
     """把任意来源的 DataFrame 归一到统一格式。
 
-    - 列名已含 4 个必需列名 → 视为统一格式，按 `ALL_COLUMNS` 顺序重排；
-    - 否则**按列位**取前 4 列命名（仅用于 v1.3.2 的历史文件：
+    - 列名已含 4 个必需列名（或「金额（元）」这类旧写法）→ 视为统一格式，按 `ALL_COLUMNS` 重排；
+    - 恰好 4 列且列名全部认不出 → 按列位命名（仅用于 v1.3.2 的历史文件：
       前 4 列 = 用户方 | 支出/收入 | 客户方 | 金额）；
+    - 其余缺少必需列的情况一律抛 `SchemaError`（如把原始账单/透视表误当统一流水读，
+      按列位硬贴会把数据整列错位，宁可报错也不静默出错）；
     - 补齐缺失的扩展列，丢弃 ALL_COLUMNS 之外的列（keep_extra 时保留）；
     - 文本列 strip、金额列转数值。
     """
@@ -219,21 +222,51 @@ def normalize(df, keep_extra=False):
     # 列名归一：先去掉 BOM/零宽字符/首尾空白/全角空格再和标准列名比对。
     # 否则「交易时间 」（尾部多一个空格）这种列名会被当成未知列直接丢掉，
     # 而标准列又被补成空列 —— 表现就是「源文件明明有时间列，总表里却是空白」。
+    # 「金额（元）」是旧版/Excel 里的常见写法，一并归一到「金额」。
+    # 归一后的目标列已存在时不再改名（否则会造出重复列名），目标列同时去重。
+    standard = set(ALL_COLUMNS)
+    aliases = {'金额（元）': COL_AMOUNT, '金额(元)': COL_AMOUNT}
     rename = {}
-    for c in df.columns:
+    targets = set(cols)
+    for c in cols:
         std = _norm_col_name(c)
-        if std != c and std in set(ALL_COLUMNS) and std not in df.columns:
-            rename[c] = std
+        std = aliases.get(std, std)
+        if std == c or std not in standard or std in targets:
+            continue
+        rename[c] = std
+        targets.add(std)
     if rename:
-        _log.log('[WARN] 列名含不可见字符或多余空白，已按标准列名归一：{}'.format(
+        _log.log('[WARN] 列名含不可见字符/空白或旧版写法，已按标准列名归一：{}'.format(
             '、'.join('{} → {}'.format(k, v) for k, v in rename.items())))
         df = df.rename(columns=rename)
         cols = list(df.columns)
-    if not all(c in cols for c in CORE_COLUMNS):
-        rename = {}
-        for i, c in enumerate(cols[:len(CORE_COLUMNS)]):
-            rename[c] = CORE_COLUMNS[i]
-        df = df.rename(columns=rename)
+    if not df.columns.is_unique:
+        dups = sorted(set(str(c) for c in df.columns if list(df.columns).count(c) > 1))
+        _log.log('[WARN] 列名归一后出现重复列名，已按首次出现保留：{}'.format('、'.join(dups)))
+        df = df.loc[:, ~df.columns.duplicated()].copy()
+        cols = list(df.columns)
+
+    missing = [c for c in CORE_COLUMNS if c not in cols]
+    if missing:
+        # 列位兜底只认 v1.3.2 的历史格式：恰好 4 列，且 4 个列名全部认不出。
+        # 只要有任意一个列名已经是标准列名（如透视表汇总里的「用户方 | 支出 | 收入 | 笔数」），
+        # 就说明它根本不是老格式，按列位硬贴会把数据整列错位后静默通过，必须直接报错。
+        if len(cols) == len(CORE_COLUMNS) and not any(c in standard for c in cols):
+            rename = {cols[i]: CORE_COLUMNS[i] for i in range(len(CORE_COLUMNS))
+                      if cols[i] != CORE_COLUMNS[i]}
+            _log.log('[WARN] 4 列老格式（无标准列名），已按列位映射：{}'.format(
+                '、'.join('{} → {}'.format(k, v) for k, v in rename.items())))
+            df = df.rename(columns=rename)
+            cols = list(df.columns)
+        else:
+            shown = '、'.join(str(c) for c in cols[:12]) + ('…' if len(cols) > 12 else '')
+            raise SchemaError(
+                '无法识别必需列：缺少「{}」。\n'
+                '当前文件共 {} 列，表头为：{}。\n'
+                '统一格式的必需列是：{}。\n'
+                '如果这是微信/支付宝导出的原始账单，请先在「导入与清洗」里生成统一流水；'
+                '如果是透视表等统计结果，请改用明细流水文件。'.format(
+                    '、'.join(missing), len(cols), shown, DIR_DESC))
 
     extras = []
     if keep_extra:

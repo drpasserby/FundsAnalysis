@@ -194,7 +194,10 @@ def run_merge(inputs=None, folders=None, out_dir=None, progress=None, dedupe=Tru
         logger.log('读取 {}：{} 行'.format(os.path.basename(p), len(one)))
         frames.append(one)
     if not frames:
-        raise ValueError('全部 {} 个输入文件都无法解析，没有可合并的数据。'.format(len(skipped)))
+        detail = '；'.join('{}（{}）'.format(os.path.basename(p), str(e).strip().split('\n')[0])
+                          for p, e in skipped[:3])
+        raise ValueError('全部 {} 个输入文件都无法解析，没有可合并的数据。\n{}'.format(
+            len(skipped), detail))
 
     progress.set_indeterminate('正在合并与去重…')
     df = pd.concat(frames, ignore_index=True)
