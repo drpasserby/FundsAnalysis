@@ -33,6 +33,10 @@ TOOLS = [
     ToolSpec('flow', '资金流向分析图和报告生成',
              '流水总表 → 资金流向图与流水分析报告(HTML)',
              'tools.flow.tool'),
+    ToolSpec('structure', '（试验性模块）资金流水走向大致分析和生成人物关系图',
+             '流水总表 → P0-P3 人员分层、资金团体、人物架构与资金走向(Markdown)',
+             'tools.structure.tool',
+             note='无人物关系图时按流水估算，结论仅供摸排线索'),
 ]
 
 BY_ID = dict((t.id, t) for t in TOOLS)
