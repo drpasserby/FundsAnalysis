@@ -2,10 +2,10 @@
 ## FundsAnalysis
 
 面向资金流水走向分析的桌面工具套件：把「原始账单 → 清洗 → 合并 → 总表/透视表 → 资金流向图与分析报告」
-串成一条可接力的流水线。五个功能各自独立可用、互不干扰，产物按固定命名落在同一个输出目录，
-下一步会自动读取。
+串成一条可接力的流水线。五个正式功能各自独立可用、互不干扰，另有一个人物关系预估试验性模块，
+产物按固定命名落在同一个输出目录，下一步会自动读取。
 
-当前版本：**v2.0.6**（版本变更见 [TODO.md](TODO.md) 的版本小节；结构与设计说明见 [工具套件合并方案.md](工具套件合并方案.md)）
+当前版本：**v2.0.7**（版本变更见 [TODO.md](TODO.md) 的版本小节；结构与设计说明见 [工具套件合并方案.md](工具套件合并方案.md)）
 
 ## 功能一览
 
@@ -16,8 +16,9 @@
 | **B 多来源合并** | 一份或多份统一格式流水 | `02_合并流水.tsv`、`02_合并说明.txt` |
 | **C 流水总表与透视表** | 统一格式流水 | `03_流水总表.xlsx`、`03_流水总表.csv`、`03_数据透视表.xlsx` |
 | **D 资金流向分析** | C 的 `03_数据透视表.xlsx`（汇总件，**推荐**：`数据透视表` 表就是边数据）或统一格式流水 | `04_资金流向图与流水分析报告.html` |
+| **E（试验性）人物关系预估** | 流水总表、汇总透视表或统一格式流水（无需人物关系图） | `05_资金流水走向大致分析与人物关系预估.md` |
 
-主界面按 **微信流水导入 → 支付宝流水导入 → 多来源合并 → 流水总表与数据透视表生成 → 资金流向分析图和报告生成** 排列。
+主界面按 **微信流水导入 → 支付宝流水导入 → 多来源合并 → 流水总表与数据透视表生成 → 资金流向分析图和报告生成 → 试验性人物关系预估** 排列。
 微信与支付宝两份产物列结构完全一致（同一组列、同一顺序、`来源` 列区分），可直接交给功能 B 一起合并。
 
 `03_数据透视表.xlsx` 含三张表：
@@ -40,7 +41,7 @@
 ## 运行
 
 ```
-python main.py          # 图形入口：五个功能卡片
+python main.py          # 图形入口：五个正式功能 + 一个试验性模块
 ```
 
 依赖见 `requirements.txt`（pandas / networkx / openpyxl / xlrd）。Win10+ 用 Python 3.13 即可；
@@ -67,7 +68,7 @@ exe 名字里的版本号自动取自 `core/__init__.py`；图标与「软件信
 只写 `--paths ".."` 实测会收集成空列表（exe 里只剩一半 core/ui 模块）；
 ② `--collect-submodules core ui tools`——主界面是按注册表动态 import 功能模块的，
 静态分析扫不到这三行里的模块。脚本打完会自动用 `archive_viewer` 校验 exe 里有没有
-`tools.flow.tool` / `tools.alipay.tool`，缺了就直接报错停下。
+`tools.flow.tool` / `tools.alipay.tool` / `tools.structure.tool`，缺了就直接报错停下。
 
 ## 数据格式契约
 
@@ -222,6 +223,7 @@ tools/merge/       功能 B：多来源合并
 tools/pivot/       功能 C：流水总表与透视表
 tools/flow/        功能 D：资金流向分析（由 1.3.2 单文件切分而来；select.py 负责输入识别与关注人物筛选）
 tools/alipay/      功能 A：支付宝「账户明细」解析与清洗
+tools/structure/   试验性模块：无人物关系图时估算 P0-P3 层级、资金团体与净流向
 PackTool/          打包成 exe：PackWin.bat（选 1=Win10+/2=Win7） / PackInfo(图标+软件信息) / 打包说明.txt
 自检脚本/          开发期自检脚本（不参与打包、不被主程序引用，已在 .gitignore）
 .备份/1.3.2/        1.3.2 全量归档 + 备份说明（回归基线）
@@ -237,7 +239,7 @@ python 自检脚本/regression_html.py       # 验收：8 组（classic/ios × s
                                       #   ① 内嵌数据契约（nodes/edges/auditRows）逐字节一致
                                       #   ② 摘掉 <script> 后的页面骨架与报告正文逐字节一致
 python 自检脚本/smoke_e2e.py             # 合成微信账单跑通 A→B→C→D 并校验关键数字
-python 自检脚本/smoke_gui.py             # 真实点击五个功能卡片，捕获被 Tk 吞掉的回调异常
+python 自检脚本/smoke_gui.py             # 真实点击六个功能卡片，捕获被 Tk 吞掉的回调异常
 python 自检脚本/smoke_wechat_parse.py    # 微信账单解析：出/入 映射、多段表头、扩展列别名、新扩展列、
                                       #   不可见字符清洗、空列省略、R4 三档、全过滤诊断
 python 自检脚本/smoke_flow_large.py      # 大图：>499 主体不依赖 scipy、一致性明细按上限展示
@@ -247,6 +249,8 @@ python 自检脚本/smoke_flow_select.py     # 功能 D 输入识别与筛选：
                                       #   主体/角色读取、expand/strict/金额/日期筛选、筛空后的提示
 python 自检脚本/smoke_p1_improve.py      # 完善项：清洗报告「被删样例」、功能 B 订单号一致性检查与
                                       #   02_合并说明.txt（正常两侧记录不误报）、自环提示与构图行为一致
+python 自检脚本/smoke_schema_columns.py  # 列识别：标准/旧金额列名、错位列、原始账单、脏列名与重复列名
+python 自检脚本/smoke_structure.py       # 试验性模块：输入适配、P0-P3、连通团体、Markdown、备份与错误路径
 python 自检脚本/smoke_encoding.py        # 编码与健壮性：UTF-8/BOM、ANSI(GBK)、GB18030、UTF-16(LE) 账单与
                                       #   流水都能正确解码；坏文件抛错并写 error_log.txt；
                                       #   重复列名/重复索引不再触发 InvalidIndexError
